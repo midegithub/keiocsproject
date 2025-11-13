@@ -31,13 +31,11 @@ class MainPlayground:
         self.state_dim=None
         print("Environment initialized")
 
-        def close(self):
-            """Disconnects the Pybullet session"""
-            p.disconnect(self.client_id)
+
 
 
         self.start_pos=[0,0,0.61] #known height for Spot Robot (61cm)
-        self.start_orn = p.getQuaternionFromEuler()
+        self.start_orn = p.getQuaternionFromEuler([0,0,0]) #No rotation
         
         #get the absolute path to the robot URDF (Unified Robotics description format)
         urdf_root= os.path.dirname(os.path.abspath(__file__))
@@ -52,10 +50,10 @@ class MainPlayground:
         #Initialize the internal variable and identify joints
 
         self.actuated_joint_names=[
-            'front_left_shoulder_joint', 'front_left_thigh_joint', 'front_left_calf_joint',
-            'front_right_shoulder_joint', 'front_right_thigh_joint', 'front_right_calf_joint',
-            'rear_left_shoulder_joint', 'rear_left_thigh_joint', 'rear_left_calf_joint',
-            'rear_right_shoulder_joint', 'rear_right_thigh_joint', 'rear_right_calf_joint'
+            'motor_front_left_shoulder', 'motor_front_left_leg', 'foot_motor_front_left',
+            'motor_front_right_shoulder', 'motor_front_right_leg', 'foot_motor_front_right',
+            'motor_rear_left_shoulder', 'motor_rear_left_leg', 'foot_motor_rear_left',
+            'motor_rear_right_shoulder', 'motor_rear_right_leg', 'foot_motor_rear_right'
             ]
 
 
@@ -68,9 +66,13 @@ class MainPlayground:
 
         print (f"Environment initialized. Action dim={self.action_dim}")
 
+    def close(self):
+        """Disconnects the Pybullet session"""
+        p.disconnect(self.client_id)
+
     def _identify_actuated_joints(self):
         """To find the joints indices for the 12 joints based on their names"""
-        joint_indices=None
+        joint_indices=[]
       
         joint_name_to_index={}
         num_joints=p.getNumJoints(self.robot_id,physicsClientId=self.client_id)
@@ -78,7 +80,7 @@ class MainPlayground:
         for i in range(num_joints):
             joint_info=p.getJointInfo(self.robot_id,i,physicsClientId=self.client_id)
             #Decode the joint name
-            joint_name=joint_info.decode('utf-8')
+            joint_name=joint_info[1].decode('utf-8')
             joint_name_to_index[joint_name]=i
 
         for name in self.actuated_joint_names:
@@ -112,8 +114,8 @@ class MainPlayground:
         # Get joints states
 
         joint_states=p.getJointStates(self.robot_id, self.actuated_joint_indices, physicsClientId=self.client_id)
-        joint_pos=[s for s in joint_states]
-        joint_vel=[s for s in joint_states]
+        joint_pos=[s[0] for s in joint_states]
+        joint_vel=[s[1] for s in joint_states]
 
 
         # Concatenate all observations
@@ -139,15 +141,60 @@ class MainPlayground:
             self.robot_id, self.start_pos, self.start_orn, physicsClientId=self.client_id
         )
 
-        p.resetBaseVelocity(self.robot_id,None,None,physicsClientId=self.clien_id)
+        p.resetBaseVelocity(self.robot_id,None,None,physicsClientId=self.client_id)
 
         for i in self.actuated_joint_indices:
             p.resetJointState(self.robot_id,i, targetValue=0, targetVelocity=0, physicsClientId=self.client_id)
 
-            #TO DO:  reset the rewards (not yet implemented)
+        #TO DO:  reset the rewards (not yet implemented)
 
-            #Get initial observation
-            return self.get_observation()
+        #Get initial observation
+        return self.get_observation()
+    
+    def _apply_action(self,action):
+        """
+        Applies the given 12 torque values to the robot's actuated joints.
+        This is the core of TORQUE CONTROL.
+        """
+
+        p.setJointMotorControlArray(
+            bodyUniqueId=self.robot_id,
+            jointIndices=self.actuated_joint_indices,
+            controlMode=p.VELOCITY_CONTROL,
+            forces=np.zeros(self.action_dim), #set forces to zero
+            physicsClientId=self.client_id
+        )
+
+        p.setJointMotorControlArray(
+            bodyUniqueId=self.robot_id,
+            jointIndices=self.actuated_joint_indices,
+            controlMode=p.TORQUE_CONTROL,
+            forces=action,
+            physicsClientId=self.client_id
+        )
+
+    def get_reward(self):
+        pass
+
+    def is_done(self):
+        pass
+
+    def step(self,action):
+        """executes one step in the simulation given the aciton"""
+
+        self._apply_action(action)
+
+        p.stepSimulation(physicsClientId=self.client_id)
+
+        obs=self.get_observation()
+        reward=self.get_reward()
+        done=self.is_done()
+
+        info={}
+
+        return obs, reward, done, info
+            
+
 
             
 
@@ -192,6 +239,7 @@ if __name__ == "__main__": #Only launches if file ran indepedently
 
     try:
         while True:
+            p.stepSimulation(physicsClientId=env.client_id)
             time.sleep(1/60) #60fps
     except KeyboardInterrupt:
         print("\nClosed the simulation environment")
