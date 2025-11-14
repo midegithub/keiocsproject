@@ -226,7 +226,23 @@ class MainPlayground:
         return reward
 
     def is_done(self):
-        pass
+        """Checks if the episode is done based on the robot's state."""
+        base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
+        base_height=base_pos[2]
+        base_orn_euler=p.getEulerFromQuaternion(base_orn_quat)
+        pitch=base_orn_euler[1]
+
+        if base_height <0.2:
+            print("Episode done: Robot fell over (height <0.2m)")
+            return True
+        
+        if abs(pitch) > 0.8: #45 degrees
+            print("Episode done: Robot tilted too much (pitch >45 degrees)")
+            return True
+        
+        return False
+    
+
             
 
 
