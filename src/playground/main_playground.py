@@ -146,7 +146,8 @@ class MainPlayground:
         for i in self.actuated_joint_indices:
             p.resetJointState(self.robot_id,i, targetValue=0, targetVelocity=0, physicsClientId=self.client_id)
 
-        #TO DO:  reset the rewards (not yet implemented)
+        self.reward_checkpoint_1=False
+        self.reward_checkpoint_2=False
 
         #Get initial observation
         return self.get_observation()
@@ -173,11 +174,7 @@ class MainPlayground:
             physicsClientId=self.client_id
         )
 
-    def get_reward(self):
-        pass
 
-    def is_done(self):
-        pass
 
     def step(self,action):
         """executes one step in the simulation given the aciton"""
@@ -195,7 +192,41 @@ class MainPlayground:
         return obs, reward, done, info
             
 
+    def get_reward(self):
+        """Computes the reward for the current state."""
 
+        base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
+        base_vel_lin, _ = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
+        base_orn_euler = p.getEulerFromQuaternion(base_orn_quat)
+
+        x_velocity = base_vel_lin
+        base_height = base_pos
+        pitch = base_orn_euler
+
+        #Reward components
+        target_height = 0.61  # Target height for the SPot Robot
+        target_pitch = 0.0   # Target pitch angle (level)
+
+        reward_forward = 2.0*x_velocity
+
+        penality_pitch = 1.5*abs(pitch - target_pitch)
+        penality_height = 1.0*abs(base_height - target_height)
+
+        #TO DO: Add energy consumption penality?
+
+        reward= reward_forward - penality_pitch - penality_height
+
+        if base_pos>1.0 and not self.reward_checkpoint_1:
+            reward +=5.0
+            self.reward_checkpoint_1=True
+        if base_pos>2.0 and not self.reward_checkpoint_2:
+            reward +=5.0
+            self.reward_checkpoint_2=True
+        
+        return reward
+
+    def is_done(self):
+        pass
             
 
 
