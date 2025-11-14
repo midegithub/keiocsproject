@@ -120,7 +120,7 @@ class MainPlayground:
 
         # Concatenate all observations
 
-        obs_list= ([base_pos]+
+        obs_list= ([base_pos[2]]+
                    list(base_orn_quat)+
                    list(base_vel_lin)+
                    list(base_vel_ang)+
@@ -199,9 +199,9 @@ class MainPlayground:
         base_vel_lin, _ = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
         base_orn_euler = p.getEulerFromQuaternion(base_orn_quat)
 
-        x_velocity = base_vel_lin
-        base_height = base_pos
-        pitch = base_orn_euler
+        x_velocity = base_vel_lin[0]
+        base_height = base_pos[2]
+        pitch = base_orn_euler[1]
 
         #Reward components
         target_height = 0.61  # Target height for the SPot Robot
@@ -216,10 +216,10 @@ class MainPlayground:
 
         reward= reward_forward - penality_pitch - penality_height
 
-        if base_pos>1.0 and not self.reward_checkpoint_1:
+        if base_pos[0]>1.0 and not self.reward_checkpoint_1:
             reward +=5.0
             self.reward_checkpoint_1=True
-        if base_pos>2.0 and not self.reward_checkpoint_2:
+        if base_pos[0]>2.0 and not self.reward_checkpoint_2:
             reward +=5.0
             self.reward_checkpoint_2=True
         
@@ -268,14 +268,20 @@ if __name__ == "__main__": #Only launches if file ran indepedently
 
     print("\nPybullet environment createed")
 
+    dummy_action = np.zeros(env.action_dim)
+
     try:
         while True:
-            p.stepSimulation(physicsClientId=env.client_id)
+            env.step(dummy_action)
             time.sleep(1/60) #60fps
     except KeyboardInterrupt:
         print("\nClosed the simulation environment")
     finally:
-        env.close()
+        if p.isConnected(env.client_id):
+            print("Closing environment cleanly.")
+            env.close()
+        else:
+            print("GUI window was closed. No disconnect needed.")
 
 
 
