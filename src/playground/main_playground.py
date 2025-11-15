@@ -282,7 +282,7 @@ if __name__ == "__main__": #Only launches if file ran indepedently
     #Call of the main playground class
     env = MainPlayground(gui=True) 
 
-    print("\nPybullet environment createed")
+    print("\nPybullet environment created")
 
     dummy_action = np.zeros(env.action_dim)
 
