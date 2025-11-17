@@ -21,6 +21,13 @@ class ActorCritic(nn.Module):
             nn.Tanh()
         )
 
+        #This part of the network learns the mean of the action distribution
+        self.actor_mean= nn.Linear(hidden_size, action_dim)
+        self.log_std= nn.Parameter(torch.zeros(action_dim)) #Standard log-deviation of the action distribution
+
+        #This part of the network learns the value of the state
+        self.critic= nn.Linear(hidden_size, 1)
+
     def forward(self, state):
         """Performs a forward pass through the Actor-Critic network.
         Arguments:
@@ -30,3 +37,50 @@ class ActorCritic(nn.Module):
             the estimated value of the state (Critic)"""
         
         x=self.shared_layers(state)
+
+        # Actor output
+        action_mean=self.actor_mean(x)
+
+        # Numerical stability: Convert log_std to std
+        std = torch.exp(self.log_std)
+
+        # Create the action distribution
+        dist = Normal(action_mean, std)
+
+        # Critic output
+        value = self.critic(x)
+
+        return dist, value # Action distribution and value of the state
+
+        # Helper method
+
+        def act(self, state):
+            """
+            Get an action from the policy (for rollout pahse).
+            Includes gradients for log_prob and value, but no gradients for the state."""
+
+            dist, value = self.forward(state)
+
+            action = dist.sample() # Sample an action from the distribution
+
+            #Calculate its log-proba
+
+            log_prob = dist.log_prob(action).sum(dim=-1)
+
+            return action, log_prob, value.squeeze()
+
+        def evaluate(self, state, action):
+            """
+            Get values for a given state and action. for update phase"""
+
+            dist, value = self.forward(state)
+
+            #Get the logproba of the action
+
+            log_prob = dist.log_prob(action).sum(dim=-1)
+
+            #Get the entropy of the distribution
+
+            entropy = dist.entropy().sum(dim=-1)
+
+            return log_prob, value.squeeze(), entropy #Squeeze value to be 1-dimensional
