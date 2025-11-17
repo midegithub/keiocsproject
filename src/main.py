@@ -18,7 +18,23 @@ if __name__ == "__main__": #Only launches if file ran independently
 
     try:
         while True:
-            env.step(dummy_action)
+            # Check if physics server is still connected
+            if not p.isConnected(env.client_id):
+                print("\nPhysics server disconnected (GUI window closed)")
+                break
+            
+            try:
+                obs, reward, done, info = env.step(dummy_action)
+                
+                # Reset if episode is done
+                if done:
+                    print("Resetting environment...")
+                    env.reset()
+            except p.error:
+                # Catch PyBullet error when GUI is closed during step
+                print("\nPhysics server disconnected (GUI window closed)")
+                break
+            
             time.sleep(1/60) #60fps
     except KeyboardInterrupt:
         print("\nClosed the simulation environment")
