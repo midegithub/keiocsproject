@@ -73,4 +73,62 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
 
         return advantages, returns
 
-        #Need to make the update
+    def update(self, buffer, advantages, returns):
+        """
+        The PPO Update Phase.
+        Iterates over the data for num_epochs times, and updates the actor-critic network.
+        """
+
+        data_generator = buffer.get_minibatch_generator(advantages, returns, self.minibatch_size)
+        
+        for _ in range(self.num_epochs): #Loop for the number of epochs
+            for batch in data_generator:
+                (
+                    batch_states,
+                    batch_actions,
+                    batch_old_log_probs,
+                    batch_old_values, #Not used in loss, but good for value clipping
+                    batch_advantages,
+                    batch_returns
+                ) = batch
+
+                # Re evaktuate states and actions 
+                #This is the new policy's view of the old data, we need new log_probs and values.
+
+                new_log_probs, new_values, entropy = self.model.evaluate(batch_states, batch_actions)
+
+                # Policy Loss (L-Clip)
+
+                #The probability ratio : r_t(theta) = pi_new(a|s)/pi_old(a|s)
+                #In log space: r_t=exp(log(pi_new)-log(pi_old))
+
+                ratio = torch.exp(new_log_probs - batch_old_log_probs)
+
+                #The surrogate objective : surr1= ratio*A_t 
+                #It measures how much better the new policy is compared to the old one.
+                surr1=ratio*batch_advantages
+
+                #The clipped surrogate objective : surr2= clip(ratio, 1-clip_epsilon, 1+clip_epsilon)*A_t
+                #It ensures that the new policy is not too different from the old one.
+                surr2=torch.clamp(ratio, 1-self.clip_epsilon, 1+self.clip_epsilon)*batch_advantages
+
+                #Policy loss is the minimum of the two surrogate objectives
+                #We use -min because optimisers minimise. but we want to maximise
+                policy_loss=-torch.min(surr1, surr2).mean()
+
+                # LVF
+                value_loss=0.5*((new_values-batch_returns)**2).mean()
+
+                # Entropy bonus
+
+                entropy_loss=-entropy.mean() #We want to maximise the entropy
+
+                # Total loss
+                total_loss=(policy_loss+self.v_coef*value_loss+self.entropy_coef*entropy_loss)
+
+                #Gradient descent step
+                self.optimizer.zero_grad() #Clear the gradients
+                total_loss.backward() #Backpropagate the loss
+                #Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5) #Clip the gradients to prevent exploding gradients
+                self.optimizer.step() #Update the parameters
