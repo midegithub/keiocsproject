@@ -19,7 +19,7 @@ from agent.buffer import RolloutBuffer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
 print(f"Using device: {DEVICE}")
 
-TOTAL_TIMESTEPS = 1_000_000 # 1 million timesteps is the total number of timesteps the agent will train for.
+TOTAL_TIMESTEPS = 200_000 # 200K timesteps is the total number of timesteps the agent will train for.
 ROLLOUT_STEPS = 2048 # Number of steps to collect data for each rollout a rollout is a sequence of actions taken by the agent.
 MINIBATCH_SIZE = 64 # Size of the mini-batches for training a minibatch is a subset of the data used to train the agent.
 NUM_EPOCHS = 10 # Number of epochs for training an epoch is the number of times the agent will re-study its recent experiences before gathering new ones.
@@ -129,8 +129,30 @@ def main():
     #Plotting to be implemented
     plot_rewards(all_ep_rewards, all_avg_rewards)
 
-def plot_rewards(ep_rewards, avg_rewards):
-    pass
+def plot_rewards(rewards, avg_rewards):
+    """uses matplotlib to plot the raw and moving average rewards"""
+    print("Plotting rewards...")
+    plt.figure(figsize=(12,6))
+
+    #Plot raw rewards with transparency
+    plt.plot(rewards, label="Episode Rewards", alpha=0.3, color="blue")
+
+    #Plot moving average rewards
+    if len(avg_rewards) > 0:
+        plt.plot(avg_rewards, label="Moving Average Rewards(50 episodes)", color="red", linewidth=2)
+
+    
+    plt.title("PPO Training Progress: Episode Rewards Over Time")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.legend()
+    plt.grid(True)
+    
+    #Save the plot
+    plot_path="../../plots/training_rewards.png"
+    plt.savefig(plot_path)
+    print(f"Plot saved to {plot_path}")
+    #plt.show()
 
 if __name__ == "__main__":
     main()
