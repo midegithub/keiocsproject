@@ -19,25 +19,25 @@ from agent.buffer import RolloutBuffer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
 print(f"Using device: {DEVICE}")
 
-TOTAL_TIMESTEPS = 300_000 # more timesteps = better learning
-ROLLOUT_STEPS = 2048 # Number of steps to collect data for each rollout a rollout is a sequence of actions taken by the agent.
-MINIBATCH_SIZE = 64 # Size of the mini-batches for training a minibatch is a subset of the data used to train the agent.
-NUM_EPOCHS = 10 # Number of epochs for training an epoch is the number of times the agent will re-study its recent experiences before gathering new ones.
-SAVE_INTERVAL = 8 # Save model every N Rollouts
+TOTAL_TIMESTEPS = 500_000 # Extended for better learning with new ground-up approach
+ROLLOUT_STEPS = 4096 # Larger rollouts = better GPU utilization and faster training
+MINIBATCH_SIZE = 128 # Larger batches = more efficient GPU usage
+NUM_EPOCHS = 6 # Reduced epochs to speed up training loop
+SAVE_INTERVAL = 4 # Save more frequently to track best model
 
 #Create output directory
 os.makedirs("models", exist_ok=True)
 os.makedirs("plots", exist_ok=True)
 os.makedirs("data", exist_ok=True)
 
-# better hyperparameters for stable learning
+# Optimized hyperparameters for ground-up learning
 HYPERPARAMETERS = {
-    'lr': 2.5e-4, #slightly lower lr for stability
-    'gamma': 0.99,
-    'lambda_gae': 0.95,
-    'clip_epsilon': 0.2,
-    'v_coef': 0.8, #value function more important
-    'entropy_coef': 0.015, #bit more exploration
+    'lr': 3e-4, # Standard PPO learning rate
+    'gamma': 0.99, # Standard discount factor
+    'lambda_gae': 0.95, # GAE parameter
+    'clip_epsilon': 0.2, # PPO clipping
+    'v_coef': 0.5, # Balanced value function weight
+    'entropy_coef': 0.01, # Moderate exploration
     'num_epochs': NUM_EPOCHS,
     'minibatch_size': MINIBATCH_SIZE
     }
@@ -45,14 +45,23 @@ HYPERPARAMETERS = {
 
 #Initialization
 def main():
-    #Set gui=False for maximum training speed
-    env = MainPlayground(gui=False)
+    #Set gui=False for maximum training speed, use multiple sim steps for faster training
+    env = MainPlayground(gui=False, sim_steps_per_action=4)
     state=env.reset()
     state_dim=env.state_dim
     action_dim=env.action_dim
     print(f'Environment initialized. State dim={state_dim}, Action dim={action_dim}')
+    print(f'Training optimizations: 4 physics steps per action for {4}x speed boost')
 
     agent = PPOAgent(state_dim, action_dim, DEVICE, HYPERPARAMETERS) # Pass hyperparameters as a single dictionary
+    
+    # PyTorch 2.0+ compilation for speed boost (if available)
+    try:
+        if hasattr(torch, 'compile'):
+            agent.model = torch.compile(agent.model)
+            print("✅ Model compiled with torch.compile for faster training")
+    except:
+        print("⚠️  torch.compile not available, using standard mode")
     
     # try loading existing model to continue training
     latest_model = None
@@ -81,6 +90,10 @@ def main():
     # The tensor is a multi-dimensional array of numbers used for calculations on GPU or CPU.
     num_timesteps=0
     rollout_count=0
+    
+    # Track best model performance
+    best_avg_reward = float('-inf')
+    best_model_path = None
 
     #mMain training loop
     while num_timesteps < TOTAL_TIMESTEPS:
@@ -144,13 +157,31 @@ def main():
         if rollout_count % SAVE_INTERVAL == 0:
             save_path=f"models/ppo_spotmicro_{num_timesteps}.pth"
             torch.save(agent.model.state_dict(), save_path)
-            print(f"[SAVE] Model saved at timestep {num_timesteps}")
             
-            #also save training data for plotting later
+            # Calculate current performance
+            current_avg = np.mean(all_ep_rewards[-50:]) if len(all_ep_rewards) >= 50 else np.mean(all_ep_rewards) if all_ep_rewards else float('-inf')
+            
+            # Save performance metrics
             import pickle
             data_path = f"data/training_data_{num_timesteps}.pkl"
             with open(data_path, 'wb') as f:
-                pickle.dump({'rewards': all_ep_rewards, 'avg_rewards': all_avg_rewards}, f)
+                pickle.dump({
+                    'rewards': all_ep_rewards, 
+                    'avg_rewards': all_avg_rewards,
+                    'avg_reward_50': current_avg,
+                    'timesteps': num_timesteps
+                }, f)
+            
+            # Track best model
+            if current_avg > best_avg_reward:
+                best_avg_reward = current_avg
+                best_model_path = save_path
+                # Save a copy as "best" model
+                best_save_path = "models/ppo_spotmicro_BEST.pth"
+                torch.save(agent.model.state_dict(), best_save_path)
+                print(f"[SAVE] ⭐ NEW BEST MODEL at timestep {num_timesteps} with avg reward {current_avg:.2f}")
+            else:
+                print(f"[SAVE] Model saved at timestep {num_timesteps} (avg reward: {current_avg:.2f})")
         
         #print progress every rollout
         if len(all_ep_rewards)>0:
