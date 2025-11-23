@@ -19,24 +19,25 @@ from agent.buffer import RolloutBuffer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
 print(f"Using device: {DEVICE}")
 
-TOTAL_TIMESTEPS = 200_000 # 200K timesteps is the total number of timesteps the agent will train for.
+TOTAL_TIMESTEPS = 300_000 # more timesteps = better learning
 ROLLOUT_STEPS = 2048 # Number of steps to collect data for each rollout a rollout is a sequence of actions taken by the agent.
 MINIBATCH_SIZE = 64 # Size of the mini-batches for training a minibatch is a subset of the data used to train the agent.
 NUM_EPOCHS = 10 # Number of epochs for training an epoch is the number of times the agent will re-study its recent experiences before gathering new ones.
-SAVE_INTERVAL = 5 # Save model every N Rollouts
+SAVE_INTERVAL = 8 # Save model every N Rollouts
 
 #Create output directory
 os.makedirs("models", exist_ok=True)
 os.makedirs("plots", exist_ok=True)
+os.makedirs("data", exist_ok=True)
 
-# Hyperparameters chosen by research papers and other sources. To be tested
+# better hyperparameters for stable learning
 HYPERPARAMETERS = {
-    'lr': 3e-4,
+    'lr': 2.5e-4, #slightly lower lr for stability
     'gamma': 0.99,
     'lambda_gae': 0.95,
     'clip_epsilon': 0.2,
-    'v_coef': 0.5,
-    'entropy_coef': 0.01,
+    'v_coef': 0.8, #value function more important
+    'entropy_coef': 0.015, #bit more exploration
     'num_epochs': NUM_EPOCHS,
     'minibatch_size': MINIBATCH_SIZE
     }
@@ -53,14 +54,22 @@ def main():
 
     agent = PPOAgent(state_dim, action_dim, DEVICE, HYPERPARAMETERS) # Pass hyperparameters as a single dictionary
     
-    # CURRICULUM LEARNING
-    # Load the pre-trained balancing model to bootstrap locomotion training, the idea is to start the agent with a model that already knows how to balance to then focus on learning to walk.
-    balancing_model_path = "models/balancing_model.pth"
-    if os.path.exists(balancing_model_path):
-        agent.model.load_state_dict(torch.load(balancing_model_path, map_location=DEVICE))
-        print(f"Successfully loaded balancing model from {balancing_model_path}")
-    else:
-        print("No balancing model found. Starting from scratch.")
+    # try loading existing model to continue training
+    latest_model = None
+    import glob
+    model_files = glob.glob("models/ppo_spotmicro_*.pth")
+    if model_files:
+        #get the one with highest timestep number
+        latest_model = max(model_files, key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        try:
+            agent.model.load_state_dict(torch.load(latest_model, map_location=DEVICE))
+            print(f"Loaded existing model from {latest_model}")
+        except:
+            print(f"Couldnt load {latest_model}, starting fresh")
+            latest_model = None
+    
+    if not latest_model:
+        print("No existing model found, starting from scratch")
     
     buffer = RolloutBuffer(ROLLOUT_STEPS, state_dim, action_dim, DEVICE)
 
@@ -101,13 +110,15 @@ def main():
 
             if done:
                 # Log episode results
-                print(f"Timestep {num_timesteps}: Episode reward={current_ep_reward:.2f}") #2 decimal
                 all_ep_rewards.append(current_ep_reward)
 
                 #Calculate and log moving average (for smooth plotting)
-
                 avg_reward=np.mean(all_ep_rewards[-50:])
                 all_avg_rewards.append(avg_reward)
+                
+                #print every 10 episodes so we dont spam console
+                if len(all_ep_rewards) % 10 == 0:
+                    print(f"Timestep {num_timesteps}, Episodes {len(all_ep_rewards)}: Reward={current_ep_reward:.2f}, Avg={avg_reward:.2f}")
 
                 #Reset
                 state=env.reset()
@@ -133,7 +144,18 @@ def main():
         if rollout_count % SAVE_INTERVAL == 0:
             save_path=f"models/ppo_spotmicro_{num_timesteps}.pth"
             torch.save(agent.model.state_dict(), save_path)
-            print(f"Model saved at timestep {num_timesteps} to {save_path}")
+            print(f"[SAVE] Model saved at timestep {num_timesteps}")
+            
+            #also save training data for plotting later
+            import pickle
+            data_path = f"data/training_data_{num_timesteps}.pkl"
+            with open(data_path, 'wb') as f:
+                pickle.dump({'rewards': all_ep_rewards, 'avg_rewards': all_avg_rewards}, f)
+        
+        #print progress every rollout
+        if len(all_ep_rewards)>0:
+            recent_avg = np.mean(all_ep_rewards[-20:]) if len(all_ep_rewards)>=20 else np.mean(all_ep_rewards)
+            print(f"Rollout {rollout_count}/{TOTAL_TIMESTEPS//ROLLOUT_STEPS}: Recent avg reward: {recent_avg:.2f}")
     env.close()
 
     #Plotting to be implemented
