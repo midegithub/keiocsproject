@@ -52,6 +52,16 @@ def main():
     print(f'Environment initialized. State dim={state_dim}, Action dim={action_dim}')
 
     agent = PPOAgent(state_dim, action_dim, DEVICE, HYPERPARAMETERS) # Pass hyperparameters as a single dictionary
+    
+    # CURRICULUM LEARNING
+    # Load the pre-trained balancing model to bootstrap locomotion training, the idea is to start the agent with a model that already knows how to balance to then focus on learning to walk.
+    balancing_model_path = "models/balancing_model.pth"
+    if os.path.exists(balancing_model_path):
+        agent.model.load_state_dict(torch.load(balancing_model_path, map_location=DEVICE))
+        print(f"Successfully loaded balancing model from {balancing_model_path}")
+    else:
+        print("No balancing model found. Starting from scratch.")
+    
     buffer = RolloutBuffer(ROLLOUT_STEPS, state_dim, action_dim, DEVICE)
 
     #Logging

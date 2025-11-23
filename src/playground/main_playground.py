@@ -193,7 +193,16 @@ class MainPlayground:
             
 
     def get_reward(self):
-        """Computes the reward for the current state."""
+        """Computes the reward for the current state.
+        
+        CURRICULUM LEARNING NOTES:
+        Stage 1 (Balancing): To train balancing-only model, comment out 
+        reward_forward and set reward = -penality_pitch - penality_height.
+        Train for ~200k steps then save as models/balancing_model.pth
+        
+        Stage 2 (Locomotion): Revert changes and run normal training. The
+        train.py script will automatically load the balancing model weights.
+        """
 
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
         base_vel_lin, _ = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
@@ -207,14 +216,19 @@ class MainPlayground:
         target_height = 0.61  # Target height for the SPot Robot
         target_pitch = 0.0   # Target pitch angle (level)
 
-        reward_forward = 2.0*x_velocity
+        # STAGE 1: comment this out for balancing-only training
+        # Stage 2: uncomment this for locomotion training
+        reward_forward = 2.0*x_velocity  
+
 
         penality_pitch = 1.5*abs(pitch - target_pitch)
         penality_height = 1.0*abs(base_height - target_height)
 
         #TO DO: Add energy consumption penality?
 
-        reward= reward_forward - penality_pitch - penality_height
+        #Stage 1: change to: reward = -penality_pitch - penality_height
+        #Stage 2: change to: reward = reward_forward - penality_pitch - penality_height
+        reward= reward_forward - penality_pitch - penality_height  
 
         if base_pos[0]>1.0 and not self.reward_checkpoint_1:
             reward +=5.0
