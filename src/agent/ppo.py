@@ -62,11 +62,11 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
                 next_non_terminal = 1.0 - dones[t+1]
                 next_value = values[t+1]
 
-        # This is the TD error (delta):
-        # delta_t= R_t + gamma * V(S_{t+1}) - V(S_t)
-        delta = rewards[t] + self.gamma*next_value*next_non_terminal-values[t]
-        # This is the GAE formula: A_t = delta_t + (gamma*lambda)*A_{t+1}
-        advantages[t] = last_gae_lam = delta + self.gamma *self.lambda_gae *next_non_terminal*last_gae_lam
+            # This is the TD error (delta):
+            # delta_t= R_t + gamma * V(S_{t+1}) - V(S_t)
+            delta = rewards[t] + self.gamma*next_value*next_non_terminal-values[t]
+            # This is the GAE formula: A_t = delta_t + (gamma*lambda)*A_{t+1}
+            advantages[t] = last_gae_lam = delta + self.gamma *self.lambda_gae *next_non_terminal*last_gae_lam
 
         # Returns are the targets value for value function(Critic)
         returns = advantages + values
