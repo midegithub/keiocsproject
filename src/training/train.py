@@ -149,7 +149,8 @@ def plot_rewards(rewards, avg_rewards):
     plt.grid(True)
     
     #Save the plot
-    plot_path="../../plots/training_rewards.png"
+    plot_path="plots/training_rewards.png"
+    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
     plt.savefig(plot_path)
     print(f"Plot saved to {plot_path}")
     #plt.show()
