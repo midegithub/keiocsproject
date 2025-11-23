@@ -34,7 +34,7 @@ class MainPlayground:
 
 
 
-        self.start_pos=[0,0,0.61] #known height for Spot Robot (61cm)
+        self.start_pos=[0,0,0.35] #Lower starting height so robot doesnt start floating 
         self.start_orn = p.getQuaternionFromEuler([0,0,0]) #No rotation
         
         #get the absolute path to the robot URDF (Unified Robotics description format)
@@ -63,6 +63,10 @@ class MainPlayground:
             raise Exception("Error, did not find 12 actuated joints")
         
         self.action_dim=len(self.actuated_joint_indices)
+
+        #tracking stuff for adaptive rewards
+        self.timestep=0
+        self.total_episodes=0
 
         print (f"Environment initialized. Action dim={self.action_dim}")
 
@@ -136,18 +140,31 @@ class MainPlayground:
     
     def reset(self):
         """ Resets the environment to the starting state """
+        #add some randomness so robot learns to recover from different positions
+        random_height = self.start_pos[2] + np.random.uniform(-0.03,0.03)
+        random_pos=[self.start_pos[0], self.start_pos[1], random_height]
+        
+        #small random rotation so it doesnt always start perfectly level
+        random_roll = np.random.uniform(-0.05,0.05) 
+        random_pitch= np.random.uniform(-0.05,0.05)
+        random_orn = p.getQuaternionFromEuler([random_roll,random_pitch,0])
+        
         #Reset robot base
         p.resetBasePositionAndOrientation(
-            self.robot_id, self.start_pos, self.start_orn, physicsClientId=self.client_id
+            self.robot_id, random_pos, random_orn, physicsClientId=self.client_id
         )
 
         p.resetBaseVelocity(self.robot_id,None,None,physicsClientId=self.client_id)
 
+        #randomize joint positions slightly so robot doesnt memorize one starting config
         for i in self.actuated_joint_indices:
-            p.resetJointState(self.robot_id,i, targetValue=0, targetVelocity=0, physicsClientId=self.client_id)
+            random_joint_pos= np.random.uniform(-0.1,0.1)
+            p.resetJointState(self.robot_id,i, targetValue=random_joint_pos, targetVelocity=0, physicsClientId=self.client_id)
 
         self.reward_checkpoint_1=False
         self.reward_checkpoint_2=False
+        self.timestep=0 
+        self.total_episodes+=1
 
         #Get initial observation
         return self.get_observation()
@@ -193,50 +210,64 @@ class MainPlayground:
             
 
     def get_reward(self):
-        """Computes the reward for the current state.
-        
-        CURRICULUM LEARNING NOTES:
-        Stage 1 (Balancing): To train balancing-only model, comment out 
-        reward_forward and set reward = -penality_pitch - penality_height.
-        Train for ~200k steps then save as models/balancing_model.pth
-        
-        Stage 2 (Locomotion): Revert changes and run normal training. The
-        train.py script will automatically load the balancing model weights.
-        """
+        """Computes the reward with automatic curriculum learning built-in.
+        No need to manually switch between balancing and walking modes"""
 
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
-        base_vel_lin, _ = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
+        base_vel_lin, base_vel_ang = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
         base_orn_euler = p.getEulerFromQuaternion(base_orn_quat)
 
         x_velocity = base_vel_lin[0]
+        y_velocity = base_vel_lin[1] 
         base_height = base_pos[2]
+        roll = base_orn_euler[0]
         pitch = base_orn_euler[1]
+        yaw = base_orn_euler[2]
 
-        #Reward components
-        target_height = 0.61  # Target height for the SPot Robot
-        target_pitch = 0.0   # Target pitch angle (level)
+        #adaptive curriculum - automatically shifts focus from balancing to walking
+        #early episodes focus on staying upright, later ones focus on moving forward
+        balance_weight = max(0.3, 1.0 - self.total_episodes/500.0) #decreases over time
+        locomotion_weight = min(1.0, self.total_episodes/500.0) #increases over time
 
-        # STAGE 1: comment this out for balancing-only training
-        # Stage 2: uncomment this for locomotion training
-        reward_forward = 2.0*x_velocity  
+        #survival bonus - just staying alive is good especially early on
+        survival_bonus=0.15
+        
+        #forward movement reward - only reward forward motion not backward
+        reward_forward = locomotion_weight * 2.5*max(0,x_velocity)  
+        
+        #penalize sideways drift - want straight line walking
+        penalty_lateral = 0.5*abs(y_velocity)
+        
+        #height penalty - want to stay at reasonable height
+        #using squared penalty so big deviations hurt more
+        target_height = 0.35 
+        height_diff = abs(base_height - target_height)
+        penalty_height = balance_weight * 2.0*(height_diff**2)
+        
+        #orientation penalties - both pitch AND roll matter
+        #squared penalties again for bigger punishment on large tilts
+        penalty_pitch = balance_weight * 3.0*(pitch**2)
+        penalty_roll = balance_weight * 3.0*(roll**2) 
+        penalty_yaw = 0.3*abs(yaw) #dont spin around
+        
+        #energy efficiency - penalize crazy spinning and jerky movements
+        ang_vel_magnitude = np.sqrt(base_vel_ang[0]**2 + base_vel_ang[1]**2 + base_vel_ang[2]**2)
+        penalty_energy = 0.05*ang_vel_magnitude
+        
+        #combine everything
+        reward= (survival_bonus + reward_forward 
+                 - penalty_height - penalty_pitch - penalty_roll 
+                 - penalty_lateral - penalty_yaw - penalty_energy)
 
-
-        penality_pitch = 1.5*abs(pitch - target_pitch)
-        penality_height = 1.0*abs(base_height - target_height)
-
-        #TO DO: Add energy consumption penality?
-
-        #Stage 1: change to: reward = -penality_pitch - penality_height
-        #Stage 2: change to: reward = reward_forward - penality_pitch - penality_height
-        reward= reward_forward - penality_pitch - penality_height  
-
+        #milestone bonuses for distance traveled
         if base_pos[0]>1.0 and not self.reward_checkpoint_1:
-            reward +=5.0
+            reward +=8.0
             self.reward_checkpoint_1=True
         if base_pos[0]>2.0 and not self.reward_checkpoint_2:
-            reward +=5.0
+            reward +=12.0
             self.reward_checkpoint_2=True
         
+        self.timestep+=1
         return reward
 
     def is_done(self):
@@ -244,14 +275,22 @@ class MainPlayground:
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
         base_height=base_pos[2]
         base_orn_euler=p.getEulerFromQuaternion(base_orn_quat)
+        roll = base_orn_euler[0]
         pitch=base_orn_euler[1]
 
-        if base_height <0.2:
-            print("Episode done: Robot fell over (height <0.2m)")
+        #relaxed termination so robot has more time to learn
+        if base_height <0.12: #pretty low before we call it quits
+            #print("Episode done: Robot fell over")
             return True
         
-        if abs(pitch) > 0.8: #45 degrees
-            print("Episode done: Robot tilted too much (pitch >45 degrees)")
+        #check both pitch and roll - dont want it tipping any direction
+        if abs(pitch) > 1.0 or abs(roll)>1.0: #~57 degrees, more forgiving than before
+            #print("Episode done: Robot tilted too much")
+            return True
+        
+        #max episode length so it doesnt run forever if it just stands still
+        if self.timestep >2000:
+            #print("Episode done: max timesteps reached")
             return True
         
         return False
