@@ -6,7 +6,13 @@ import time
 import os
 
 class MainPlayground:
-    def __init__(self, gui=True):
+    def __init__(self, gui=True, sim_steps_per_action=4):
+        """
+        Initialize the robot simulation environment
+        Args:
+            gui: Whether to show visualization window
+            sim_steps_per_action: Number of physics steps per action (higher = faster training)
+        """
         #Start Physics server, p.GUI opens a visible window whereas p.DIRECT runs headless
         if gui:
             self.client_id=p.connect(p.GUI)
@@ -19,7 +25,10 @@ class MainPlayground:
         #Setup data paths and world properties
         p.setAdditionalSearchPath(pybullet_data.getDataPath()) #Will get plane URDF using taht path
         p.setGravity(0,0,-9.81)
-        p.setRealTimeSimulation(0) 
+        p.setRealTimeSimulation(0)
+        
+        # Speed optimization: run multiple physics steps per action
+        self.sim_steps_per_action = sim_steps_per_action 
         
         #Loading the ground plane
         self.plane_id=p.loadURDF("plane.urdf")
@@ -34,7 +43,8 @@ class MainPlayground:
 
 
 
-        self.start_pos=[0,0,0.35] #Lower starting height so robot doesnt start floating 
+        # Start robot on the ground so it learns to get up first
+        self.start_pos=[0,0,0.12] #Start low - robot needs to learn to stand up
         self.start_orn = p.getQuaternionFromEuler([0,0,0]) #No rotation
         
         #get the absolute path to the robot URDF (Unified Robotics description format)
@@ -140,13 +150,14 @@ class MainPlayground:
     
     def reset(self):
         """ Resets the environment to the starting state """
-        #add some randomness so robot learns to recover from different positions
-        random_height = self.start_pos[2] + np.random.uniform(-0.03,0.03)
+        #Start robot on ground with varied orientations - learns to get up
+        #Randomize height slightly but keep it low
+        random_height = self.start_pos[2] + np.random.uniform(-0.02,0.05)
         random_pos=[self.start_pos[0], self.start_pos[1], random_height]
         
-        #small random rotation so it doesnt always start perfectly level
-        random_roll = np.random.uniform(-0.05,0.05) 
-        random_pitch= np.random.uniform(-0.05,0.05)
+        #Larger random rotation - robot needs to learn from various fallen positions
+        random_roll = np.random.uniform(-0.15,0.15) 
+        random_pitch= np.random.uniform(-0.15,0.15)
         random_orn = p.getQuaternionFromEuler([random_roll,random_pitch,0])
         
         #Reset robot base
@@ -194,11 +205,14 @@ class MainPlayground:
 
 
     def step(self,action):
-        """executes one step in the simulation given the aciton"""
+        """Executes one step in the simulation given the action.
+        Runs multiple physics steps per action for faster training."""
 
         self._apply_action(action)
 
-        p.stepSimulation(physicsClientId=self.client_id)
+        # Run multiple physics steps for more stable simulation and faster training
+        for _ in range(self.sim_steps_per_action):
+            p.stepSimulation(physicsClientId=self.client_id)
 
         obs=self.get_observation()
         reward=self.get_reward()
@@ -210,8 +224,8 @@ class MainPlayground:
             
 
     def get_reward(self):
-        """Computes the reward with automatic curriculum learning built-in.
-        No need to manually switch between balancing and walking modes"""
+        """Improved reward with ground-up curriculum learning.
+        Robot starts on ground and learns to: 1) lift up, 2) balance, 3) walk"""
 
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
         base_vel_lin, base_vel_ang = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
@@ -224,50 +238,63 @@ class MainPlayground:
         pitch = base_orn_euler[1]
         yaw = base_orn_euler[2]
 
-        #adaptive curriculum - automatically shifts focus from balancing to walking
-        #early episodes focus on staying upright, later ones focus on moving forward
-        balance_weight = max(0.3, 1.0 - self.total_episodes/500.0) #decreases over time
-        locomotion_weight = min(1.0, self.total_episodes/500.0) #increases over time
+        # Target standing height
+        target_height = 0.30
+        
+        # Curriculum learning - shift focus as robot improves
+        # Phase 1: Learn to lift body (episodes 0-200)
+        # Phase 2: Learn to balance upright (episodes 200-600) 
+        # Phase 3: Learn to walk forward (episodes 600+)
+        lift_weight = max(0.1, 1.0 - self.total_episodes/200.0)
+        balance_weight = max(0.3, 1.0 - self.total_episodes/600.0)
+        locomotion_weight = min(1.0, self.total_episodes/600.0)
 
-        #survival bonus - just staying alive is good especially early on
-        survival_bonus=0.15
+        # REWARD 1: Height reward - strong reward for getting off the ground
+        # Exponential reward that's strong near target height
+        height_reward = lift_weight * 10.0 * np.exp(-8.0 * (base_height - target_height)**2)
         
-        #forward movement reward - only reward forward motion not backward
-        reward_forward = locomotion_weight * 2.5*max(0,x_velocity)  
+        # REWARD 2: Upright orientation bonus - reward for staying level
+        upright_bonus = balance_weight * 3.0 * np.exp(-5.0 * (roll**2 + pitch**2))
         
-        #penalize sideways drift - want straight line walking
-        penalty_lateral = 0.5*abs(y_velocity)
+        # REWARD 3: Forward velocity - only after robot can balance
+        reward_forward = locomotion_weight * 3.0 * max(0, x_velocity)
         
-        #height penalty - want to stay at reasonable height
-        #using squared penalty so big deviations hurt more
-        target_height = 0.35 
-        height_diff = abs(base_height - target_height)
-        penalty_height = balance_weight * 2.0*(height_diff**2)
+        # PENALTY 1: Being too low is bad (fallen over)
+        penalty_too_low = 2.0 * max(0, 0.15 - base_height) 
         
-        #orientation penalties - both pitch AND roll matter
-        #squared penalties again for bigger punishment on large tilts
-        penalty_pitch = balance_weight * 3.0*(pitch**2)
-        penalty_roll = balance_weight * 3.0*(roll**2) 
-        penalty_yaw = 0.3*abs(yaw) #dont spin around
+        # PENALTY 2: Sideways movement
+        penalty_lateral = 0.3 * abs(y_velocity)
         
-        #energy efficiency - penalize crazy spinning and jerky movements
+        # PENALTY 3: Excessive rotation
+        penalty_yaw = 0.2 * abs(yaw)
+        
+        # PENALTY 4: Energy efficiency - discourage wild movements
         ang_vel_magnitude = np.sqrt(base_vel_ang[0]**2 + base_vel_ang[1]**2 + base_vel_ang[2]**2)
-        penalty_energy = 0.05*ang_vel_magnitude
+        penalty_energy = 0.03 * ang_vel_magnitude
         
-        #combine everything
-        reward= (survival_bonus + reward_forward 
-                 - penalty_height - penalty_pitch - penalty_roll 
-                 - penalty_lateral - penalty_yaw - penalty_energy)
+        # Joint velocity penalty - discourage spastic movements
+        joint_states = p.getJointStates(self.robot_id, self.actuated_joint_indices, physicsClientId=self.client_id)
+        joint_velocities = np.array([s[1] for s in joint_states])
+        penalty_joint_vel = 0.005 * np.sum(np.abs(joint_velocities))
+        
+        # Survival bonus - staying alive is good
+        survival_bonus = 0.2
+        
+        # Combine all components
+        reward = (survival_bonus + height_reward + upright_bonus + reward_forward
+                 - penalty_too_low - penalty_lateral - penalty_yaw 
+                 - penalty_energy - penalty_joint_vel)
 
-        #milestone bonuses for distance traveled
-        if base_pos[0]>1.0 and not self.reward_checkpoint_1:
-            reward +=8.0
-            self.reward_checkpoint_1=True
-        if base_pos[0]>2.0 and not self.reward_checkpoint_2:
-            reward +=12.0
-            self.reward_checkpoint_2=True
+        # Milestone bonuses
+        if base_height > 0.25 and not self.reward_checkpoint_1:
+            reward += 15.0  # Big bonus for first successful stand
+            self.reward_checkpoint_1 = True
+            
+        if base_pos[0] > 1.0 and not self.reward_checkpoint_2:
+            reward += 10.0  # Bonus for walking forward
+            self.reward_checkpoint_2 = True
         
-        self.timestep+=1
+        self.timestep += 1
         return reward
 
     def is_done(self):
