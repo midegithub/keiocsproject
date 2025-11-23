@@ -55,13 +55,19 @@ def main():
 
     agent = PPOAgent(state_dim, action_dim, DEVICE, HYPERPARAMETERS) # Pass hyperparameters as a single dictionary
     
-    # PyTorch 2.0+ compilation for speed boost (if available)
-    try:
-        if hasattr(torch, 'compile'):
-            agent.model = torch.compile(agent.model)
-            print("✅ Model compiled with torch.compile for faster training")
-    except:
-        print("⚠️  torch.compile not available, using standard mode")
+    # PyTorch 2.0+ compilation for speed boost (disabled on Windows due to C++ compiler issues)
+    # If you have Visual Studio C++ Build Tools installed, you can enable this
+    USE_TORCH_COMPILE = False  # Set to True if you have VS C++ compiler
+    
+    if USE_TORCH_COMPILE:
+        try:
+            if hasattr(torch, 'compile'):
+                agent.model = torch.compile(agent.model, mode='reduce-overhead')
+                print("Model compiled with torch.compile for faster training")
+        except Exception as e:
+            print(f"torch.compile failed ({type(e).__name__}), using standard mode")
+    else:
+        print("Using standard mode (torch.compile disabled)")
     
     # try loading existing model to continue training
     latest_model = None
@@ -179,7 +185,7 @@ def main():
                 # Save a copy as "best" model
                 best_save_path = "models/ppo_spotmicro_BEST.pth"
                 torch.save(agent.model.state_dict(), best_save_path)
-                print(f"[SAVE] ⭐ NEW BEST MODEL at timestep {num_timesteps} with avg reward {current_avg:.2f}")
+                print(f"[SAVE] NEW BEST MODEL at timestep {num_timesteps} with avg reward {current_avg:.2f}")
             else:
                 print(f"[SAVE] Model saved at timestep {num_timesteps} (avg reward: {current_avg:.2f})")
         

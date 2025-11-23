@@ -44,7 +44,7 @@ class MainPlayground:
 
 
         # Start robot on the ground so it learns to get up first
-        self.start_pos=[0,0,0.12] #Start low - robot needs to learn to stand up
+        self.start_pos=[0,0,0.30] #Start low - robot needs to learn to stand up
         self.start_orn = p.getQuaternionFromEuler([0,0,0]) #No rotation
         
         #get the absolute path to the robot URDF (Unified Robotics description format)
