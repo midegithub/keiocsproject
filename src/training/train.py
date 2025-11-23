@@ -1,7 +1,13 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import os 
+import os
+import sys
+from pathlib import Path
+
+# Add src directory to Python path
+src_path = Path(__file__).parent.parent
+sys.path.insert(0, str(src_path))
 
 #Importing custom modules
 from playground.main_playground import MainPlayground
@@ -45,7 +51,7 @@ def main():
     action_dim=env.action_dim
     print(f'Environment initialized. State dim={state_dim}, Action dim={action_dim}')
 
-    agent = PPOAgent(state_dim, action_dim, DEVICE, **HYPERPARAMETERS) # THe asterisk unpacks the hyperparameters dictionary into keyword arguments.
+    agent = PPOAgent(state_dim, action_dim, DEVICE, HYPERPARAMETERS) # Pass hyperparameters as a single dictionary
     buffer = RolloutBuffer(ROLLOUT_STEPS, state_dim, action_dim, DEVICE)
 
     #Logging
@@ -126,6 +132,5 @@ def main():
 def plot_rewards(ep_rewards, avg_rewards):
     pass
 
-        
-        
-            
+if __name__ == "__main__":
+    main()

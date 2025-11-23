@@ -3,7 +3,7 @@ import numpy as np
 
 class RolloutBuffer:
     # This class is used to store the data that is used to train the agent.
-    def ___init__(self, num_steps, state_dim, action_dim , device):
+    def __init__(self, num_steps, state_dim, action_dim , device):
         """
         Initializes the on-policy rollout buffer.
         Arguments:
@@ -73,16 +73,16 @@ class RolloutBuffer:
             end = start+ minibatch_size
             if end > total_size:
                 continue
-        
-        batch_indices = indices[start:end] 
-        
-        yield( # Better than returning a tuple, because it is more efficient
-            self.states[batch_indices],
-            self.actions[batch_indices],
-            self.log_probs[batch_indices],
-            self.values[batch_indices],# Used for value function loss
-            advantages[batch_indices],
-            returns[batch_indices]
-        )
+            
+            batch_indices = indices[start:end] 
+            
+            yield( # Better than returning a tuple, because it is more efficient
+                self.states[batch_indices],
+                self.actions[batch_indices],
+                self.log_probs[batch_indices],
+                self.values[batch_indices],# Used for value function loss
+                advantages[batch_indices],
+                returns[batch_indices]
+            )
 
 
