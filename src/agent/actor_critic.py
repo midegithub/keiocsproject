@@ -52,35 +52,34 @@ class ActorCritic(nn.Module):
 
         return dist, value # Action distribution and value of the state
 
-        # Helper method
+    # Helper method
 
-        def act(self, state):
-            """
-            Get an action from the policy (for rollout pahse).
-            Includes gradients for log_prob and value, but no gradients for the state."""
+    def act(self, state):
+        """
+        Get an action from the policy (for rollout pahse).
+        Includes gradients for log_prob and value, but no gradients for the state."""
 
-            dist, value = self.forward(state)
+        dist, value = self.forward(state)
 
-            action = dist.sample() # Sample an action from the distribution
+        action = dist.sample() # Sample an action from the distribution
 
-            #Calculate its log-proba
+        #Calculate its log-proba
 
-            log_prob = dist.log_prob(action).sum(dim=-1)
+        log_prob = dist.log_prob(action).sum(dim=-1)
 
-            return action, log_prob, value.squeeze()
+        return action, log_prob, value.squeeze() # Squeeze value to be 1-dimensional
 
-        def evaluate(self, state, action):
-            """
-            Get values for a given state and action. for update phase"""
+    def evaluate(self, state, action):
+        """
+        Get values for a given state and action. for update phase.
+        This is the old policy's view of the data, we need new log_probs and values."""
 
-            dist, value = self.forward(state)
+        dist, value = self.forward(state)
 
-            #Get the logproba of the action
+        #Get the logproba of the action
+        log_prob = dist.log_prob(action).sum(dim=-1)
 
-            log_prob = dist.log_prob(action).sum(dim=-1)
+        #Get the entropy of the distribution
+        entropy = dist.entropy().sum(dim=-1)
 
-            #Get the entropy of the distribution
-
-            entropy = dist.entropy().sum(dim=-1)
-
-            return log_prob, value.squeeze(), entropy #Squeeze value to be 1-dimensional
+        return log_prob, value.squeeze(), entropy #Squeeze value to be 1-dimensional
