@@ -23,7 +23,7 @@ TOTAL_TIMESTEPS = 200_000 # 200K timesteps is the total number of timesteps the 
 ROLLOUT_STEPS = 2048 # Number of steps to collect data for each rollout a rollout is a sequence of actions taken by the agent.
 MINIBATCH_SIZE = 64 # Size of the mini-batches for training a minibatch is a subset of the data used to train the agent.
 NUM_EPOCHS = 10 # Number of epochs for training an epoch is the number of times the agent will re-study its recent experiences before gathering new ones.
-SAVE_INTERVAL = 20 # Save model every N Rollouts
+SAVE_INTERVAL = 5 # Save model every N Rollouts
 
 #Create output directory
 os.makedirs("models", exist_ok=True)
