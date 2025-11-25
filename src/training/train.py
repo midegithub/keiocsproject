@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
 
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent
@@ -19,11 +20,15 @@ from agent.buffer import RolloutBuffer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
 print(f"Using device: {DEVICE}")
 
-TOTAL_TIMESTEPS = 500_000 # Extended for better learning with new ground-up approach
+TOTAL_TIMESTEPS = 500_000 # Tripled training time for better walking behavior learning
 ROLLOUT_STEPS = 4096 # Larger rollouts = better GPU utilization and faster training
 MINIBATCH_SIZE = 128 # Larger batches = more efficient GPU usage
 NUM_EPOCHS = 6 # Reduced epochs to speed up training loop
 SAVE_INTERVAL = 4 # Save more frequently to track best model
+
+# Visualization settings
+VISUALIZE_AT_CHECKPOINTS = True  # Set to True to see robot at each checkpoint (pauses training)
+VISUALIZE_EPISODES = 1  # Number of episodes to visualize at each checkpoint
 
 #Create output directory
 os.makedirs("models", exist_ok=True)
@@ -41,6 +46,65 @@ HYPERPARAMETERS = {
     'num_epochs': NUM_EPOCHS,
     'minibatch_size': MINIBATCH_SIZE
     }
+
+
+def visualize_checkpoint(agent, num_episodes=1):
+    """
+    Simple visualization of robot's current performance with GUI.
+    """
+    print(f"\n{'='*50}")
+    print(f"VISUALIZING - Watch the robot!")
+    print(f"{'='*50}")
+    
+    import time
+    import pybullet as p
+    
+    viz_env = None
+    try:
+        # Create temporary environment with GUI
+        viz_env = MainPlayground(gui=True, sim_steps_per_action=1)
+        
+        for ep in range(num_episodes):
+            state = viz_env.reset()
+            episode_reward = 0
+            done = False
+            steps = 0
+            max_steps = 500  # Limit steps for visualization
+            
+            print(f"Episode {ep+1} - Running for up to {max_steps} steps...")
+            
+            while not done and steps < max_steps:
+                # Check if GUI is still connected
+                if not p.isConnected(viz_env.client_id):
+                    print("GUI window closed by user")
+                    break
+                    
+                state_tensor = torch.tensor(state, dtype=torch.float32, device=DEVICE)
+                
+                with torch.no_grad():
+                    action_tensor, _, _ = agent.model.act(state_tensor.unsqueeze(0))
+                    action = action_tensor.cpu().numpy().squeeze()
+                
+                state, reward, done, _ = viz_env.step(action)
+                episode_reward += reward
+                steps += 1
+                
+                time.sleep(1./240)  # Fast visualization
+            
+            print(f"Episode {ep+1} done: {steps} steps, reward: {episode_reward:.2f}")
+        
+        print(f"Visualization complete!\n")
+        
+    except Exception as e:
+        print(f"Visualization error: {e}")
+    finally:
+        # Ensure proper cleanup
+        if viz_env is not None:
+            try:
+                if p.isConnected(viz_env.client_id):
+                    viz_env.close()
+            except:
+                pass
 
 
 #Initialization
@@ -137,7 +201,8 @@ def main():
                 
                 #print every 10 episodes so we dont spam console
                 if len(all_ep_rewards) % 10 == 0:
-                    print(f"Timestep {num_timesteps}, Episodes {len(all_ep_rewards)}: Reward={current_ep_reward:.2f}, Avg={avg_reward:.2f}")
+                    progress = (num_timesteps / TOTAL_TIMESTEPS) * 100
+                    print(f"[{progress:5.1f}%] Episode {len(all_ep_rewards):4d} | This episode: {current_ep_reward:6.2f} | Avg(last 50): {avg_reward:6.2f} | Step: {num_timesteps:,}")
 
                 #Reset
                 state=env.reset()
@@ -180,19 +245,28 @@ def main():
             
             # Track best model
             if current_avg > best_avg_reward:
+                improvement = current_avg - best_avg_reward if best_avg_reward != float('-inf') else 0
                 best_avg_reward = current_avg
                 best_model_path = save_path
-                # Save a copy as "best" model
-                best_save_path = "models/ppo_spotmicro_BEST.pth"
+                # Save a copy as "best" model with timestamp
+                timestamp = datetime.now().strftime("%d%m%H%M")  # day month hour minute
+                best_save_path = f"models/ppo_spotmicro_BEST_{timestamp}.pth"
                 torch.save(agent.model.state_dict(), best_save_path)
-                print(f"[SAVE] NEW BEST MODEL at timestep {num_timesteps} with avg reward {current_avg:.2f}")
+                # Also save without timestamp for easy reference
+                torch.save(agent.model.state_dict(), "models/ppo_spotmicro_BEST.pth")
+                print(f"[CHECKPOINT] Step {num_timesteps:,} | NEW BEST! Avg(50eps): {current_avg:.2f} (+{improvement:.2f}) | Saved: {best_save_path}")
             else:
-                print(f"[SAVE] Model saved at timestep {num_timesteps} (avg reward: {current_avg:.2f})")
+                print(f"[CHECKPOINT] Step {num_timesteps:,} | Avg(50eps): {current_avg:.2f} | Best: {best_avg_reward:.2f} | Saved: {save_path}")
+            
+            # Visualize checkpoint if enabled
+            if VISUALIZE_AT_CHECKPOINTS:
+                visualize_checkpoint(agent, num_episodes=VISUALIZE_EPISODES)
         
         #print progress every rollout
         if len(all_ep_rewards)>0:
             recent_avg = np.mean(all_ep_rewards[-20:]) if len(all_ep_rewards)>=20 else np.mean(all_ep_rewards)
-            print(f"Rollout {rollout_count}/{TOTAL_TIMESTEPS//ROLLOUT_STEPS}: Recent avg reward: {recent_avg:.2f}")
+            total_rollouts = TOTAL_TIMESTEPS // ROLLOUT_STEPS
+            print(f"[ROLLOUT {rollout_count}/{total_rollouts}] Policy updated | Avg(last 20eps): {recent_avg:.2f} | Total episodes: {len(all_ep_rewards)}")
     env.close()
 
     #Plotting to be implemented
