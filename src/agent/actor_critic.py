@@ -68,7 +68,7 @@ class ActorCritic(nn.Module):
         # Actor output
         actor_features = self.actor_head(shared_features)
         action_mean=self.actor_mean(actor_features)
-        action_mean = torch.tanh(action_mean) #bound actions
+        action_mean = torch.tanh(action_mean) #bound actions to [-1, 1]
 
         # Numerical stability: Convert log_std to std and clamp it
         #Clamping is a technique to prevent the standard deviation from becoming too large or too small.

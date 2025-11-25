@@ -103,8 +103,12 @@ def main():
     state = env.reset()
     episode_count = 0
     episode_reward = 0
+    step_count = 0
+    
+    print("\nCamera will follow the robot. Press Ctrl+C to stop.")
     
     try:
+        import pybullet as p
         while True:
             state_tensor = torch.tensor(state, dtype=torch.float32, device=DEVICE)
             
@@ -117,15 +121,30 @@ def main():
             
             state, reward, done, _ = env.step(action)
             episode_reward += reward
+            step_count += 1
             
-            # Run in real-time (PyBullet default is 240 Hz)
-            time.sleep(1./60) #60fps
+            # Update camera to follow robot every 10 steps
+            if step_count % 10 == 0:
+                base_pos, _ = p.getBasePositionAndOrientation(env.robot_id, physicsClientId=env.client_id)
+                # Camera follows robot: distance=2.5m, yaw=30deg, pitch=-20deg
+                p.resetDebugVisualizerCamera(
+                    cameraDistance=2.5,
+                    cameraYaw=30,
+                    cameraPitch=-20,
+                    cameraTargetPosition=[base_pos[0], base_pos[1], 0.3],
+                    physicsClientId=env.client_id
+                )
+            
+            # Slower visualization - 30 FPS for better viewing
+            time.sleep(1./30)
             
             if done:
                 episode_count+=1
-                print(f"Episode {episode_count} finished. Reward: {episode_reward:.2f}")
+                base_pos, _ = p.getBasePositionAndOrientation(env.robot_id, physicsClientId=env.client_id)
+                print(f"Episode {episode_count} finished. Reward: {episode_reward:.2f}, Distance: {base_pos[0]:.2f}m")
                 state = env.reset()
                 episode_reward = 0
+                step_count = 0
     except KeyboardInterrupt:
         print("\nDemo interrupted by user.")
     finally:
