@@ -20,7 +20,7 @@ from agent.buffer import RolloutBuffer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
 print(f"Using device: {DEVICE}")
 
-TOTAL_TIMESTEPS = 500_000 # Tripled training time for better walking behavior learning
+TOTAL_TIMESTEPS = 300_000 # Tripled training time for better walking behavior learning
 ROLLOUT_STEPS = 4096 # Larger rollouts = better GPU utilization and faster training
 MINIBATCH_SIZE = 128 # Larger batches = more efficient GPU usage
 NUM_EPOCHS = 6 # Reduced epochs to speed up training loop
@@ -51,6 +51,7 @@ HYPERPARAMETERS = {
 def visualize_checkpoint(agent, num_episodes=1):
     """
     Simple visualization of robot's current performance with GUI.
+    Camera follows the robot for better viewing.
     """
     print(f"\n{'='*50}")
     print(f"VISUALIZING - Watch the robot!")
@@ -69,9 +70,10 @@ def visualize_checkpoint(agent, num_episodes=1):
             episode_reward = 0
             done = False
             steps = 0
-            max_steps = 500  # Limit steps for visualization
+            max_steps = 10000  # Longer visualization to see walking
             
             print(f"Episode {ep+1} - Running for up to {max_steps} steps...")
+            print("Camera will follow the robot...")
             
             while not done and steps < max_steps:
                 # Check if GUI is still connected
@@ -89,9 +91,23 @@ def visualize_checkpoint(agent, num_episodes=1):
                 episode_reward += reward
                 steps += 1
                 
-                time.sleep(1./240)  # Fast visualization
+                # Update camera to follow robot every 10 steps
+                if steps % 10 == 0:
+                    base_pos, _ = p.getBasePositionAndOrientation(viz_env.robot_id, physicsClientId=viz_env.client_id)
+                    # Camera follows robot: distance=2.5m, yaw=30deg, pitch=-20deg
+                    p.resetDebugVisualizerCamera(
+                        cameraDistance=2.5,
+                        cameraYaw=30,
+                        cameraPitch=-20,
+                        cameraTargetPosition=[base_pos[0], base_pos[1], 0.3],
+                        physicsClientId=viz_env.client_id
+                    )
+                
+                # Slower visualization - 30 FPS instead of 240 FPS
+                time.sleep(1./30)
             
             print(f"Episode {ep+1} done: {steps} steps, reward: {episode_reward:.2f}")
+            print(f"Distance traveled: {base_pos[0]:.2f}m")
         
         print(f"Visualization complete!\n")
         
@@ -133,22 +149,38 @@ def main():
     else:
         print("Using standard mode (torch.compile disabled)")
     
-    # try loading existing model to continue training
+    # Try loading existing model to continue training
     latest_model = None
     import glob
     model_files = glob.glob("models/ppo_spotmicro_*.pth")
     if model_files:
-        #get the one with highest timestep number
-        latest_model = max(model_files, key=lambda x: int(x.split('_')[-1].split('.')[0]))
-        try:
-            agent.model.load_state_dict(torch.load(latest_model, map_location=DEVICE))
-            print(f"Loaded existing model from {latest_model}")
-        except:
-            print(f"Couldnt load {latest_model}, starting fresh")
-            latest_model = None
+        # Filter out files with non-numeric suffixes (like BEST)
+        numeric_models = []
+        for f in model_files:
+            try:
+                # Extract the part after last underscore and before .pth
+                suffix = f.split('_')[-1].split('.')[0]
+                timestep = int(suffix)
+                numeric_models.append((f, timestep))
+            except ValueError:
+                # Skip files like ppo_spotmicro_BEST.pth
+                continue
+        
+        if numeric_models:
+            # Get the one with highest timestep number
+            latest_model = max(numeric_models, key=lambda x: x[1])[0]
+            try:
+                agent.model.load_state_dict(torch.load(latest_model, map_location=DEVICE))
+                print(f"Loaded existing model from {latest_model}")
+            except Exception as e:
+                print(f"Couldn't load {latest_model}: {e}")
+                print("Starting fresh training instead")
+                latest_model = None
+        else:
+            print("No timestep-numbered models found, starting from scratch")
     
     if not latest_model:
-        print("No existing model found, starting from scratch")
+        print("Starting fresh training from scratch")
     
     buffer = RolloutBuffer(ROLLOUT_STEPS, state_dim, action_dim, DEVICE)
 
