@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import sys
+import glob
+import pickle
 from pathlib import Path
 from datetime import datetime
 
@@ -14,38 +16,104 @@ sys.path.insert(0, str(src_path))
 from playground.main_playground import MainPlayground
 from agent.ppo import PPOAgent
 from agent.buffer import RolloutBuffer
+from training.live_plotter import PlotterThread
 
 #Configuration
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
 print(f"Using device: {DEVICE}")
 
-TOTAL_TIMESTEPS = 300_000 # Tripled training time for better walking behavior learning
+TOTAL_TIMESTEPS = 5_000_000 # Enough for 100m goal
 ROLLOUT_STEPS = 4096 # Larger rollouts = better GPU utilization and faster training
 MINIBATCH_SIZE = 128 # Larger batches = more efficient GPU usage
-NUM_EPOCHS = 6 # Reduced epochs to speed up training loop
+NUM_EPOCHS = 8 # Passes over collected data
 SAVE_INTERVAL = 4 # Save more frequently to track best model
 
-# Visualization settings
-VISUALIZE_AT_CHECKPOINTS = True  # Set to True to see robot at each checkpoint (pauses training)
-VISUALIZE_EPISODES = 1  # Number of episodes to visualize at each checkpoint
+# Visualization settings (will be set by user at start)
+SHOW_LIVE_PLOTS = True
+SHOW_AT_CHECKPOINTS = False
+SHOW_NEW_RECORDS = False
 
-#Create output directory
-os.makedirs("models", exist_ok=True)
-os.makedirs("plots", exist_ok=True)
-os.makedirs("data", exist_ok=True)
-
-# Optimized hyperparameters for ground-up learning
+# Optimized hyperparameters for locomotion learning
 HYPERPARAMETERS = {
     'lr': 3e-4, # Standard PPO learning rate
     'gamma': 0.99, # Standard discount factor
     'lambda_gae': 0.95, # GAE parameter
     'clip_epsilon': 0.2, # PPO clipping
     'v_coef': 0.5, # Balanced value function weight
-    'entropy_coef': 0.01, # Moderate exploration
+    'entropy_coef': 0.015, # Increased for more exploration
     'num_epochs': NUM_EPOCHS,
-    'minibatch_size': MINIBATCH_SIZE
+    'minibatch_size': MINIBATCH_SIZE,
+    'max_grad_norm': 0.5 # Gradient clipping
     }
+
+
+def ask_user_preferences():
+    """Get user input for visualization settings at start"""
+    
+    print("\n" + "=" * 55)
+    print("QUADRUPED TRAINING - Walk 100 meters!")
+    print("=" * 55)
+    print(f"Device: {DEVICE}")
+    print(f"Timesteps: {TOTAL_TIMESTEPS:,}")
+    print(f"Rollout size: {ROLLOUT_STEPS}")
+    print(f"Minibatch: {MINIBATCH_SIZE}")
+    print("=" * 55)
+    
+    # live plots
+    print("\n[1/3] Live Plotting (reward/distance graphs)")
+    while True:
+        try:
+            ans = input("Enable live plots? (y/n) [n]: ").strip().lower()
+            if ans in ('', 'n', 'no'):
+                plots = False
+                break
+            elif ans in ('y', 'yes'):
+                plots = True
+                break
+        except KeyboardInterrupt:
+            plots = False
+            break
+    
+    # checkpoint viz
+    print("\n[2/3] Checkpoint Visualization (watch robot at saves)")
+    while True:
+        try:
+            ans = input("Enable checkpoint viz? (y/n) [n]: ").strip().lower()
+            if ans in ('', 'n', 'no'):
+                checkpoint_viz = False
+                break
+            elif ans in ('y', 'yes'):
+                checkpoint_viz = True
+                break
+        except KeyboardInterrupt:
+            checkpoint_viz = False
+            break
+    
+    # record viz
+    print("\n[3/3] Record Visualization (watch when new record)")
+    while True:
+        try:
+            ans = input("Show new records? (y/n) [n]: ").strip().lower()
+            if ans in ('', 'n', 'no'):
+                record_viz = False
+                break
+            elif ans in ('y', 'yes'):
+                record_viz = True
+                break
+        except KeyboardInterrupt:
+            record_viz = False
+            break
+    
+    print("\n" + "=" * 55)
+    print("Settings:")
+    print(f"  Plots: {'ON' if plots else 'OFF'}")
+    print(f"  Checkpoint viz: {'ON' if checkpoint_viz else 'OFF'}")
+    print(f"  Record viz: {'ON' if record_viz else 'OFF'}")
+    print("=" * 55)
+    print("\nStarting training...\n")
+    
+    return plots, checkpoint_viz, record_viz
 
 
 def visualize_checkpoint(agent, num_episodes=1):
@@ -54,7 +122,7 @@ def visualize_checkpoint(agent, num_episodes=1):
     Camera follows the robot for better viewing.
     """
     print(f"\n{'='*50}")
-    print(f"VISUALIZING - Watch the robot!")
+    print(f"CHECKPOINT VISUALIZATION")
     print(f"{'='*50}")
     
     import time
@@ -62,18 +130,17 @@ def visualize_checkpoint(agent, num_episodes=1):
     
     viz_env = None
     try:
-        # Create temporary environment with GUI
-        viz_env = MainPlayground(gui=True, sim_steps_per_action=1)
+        # Create temporary environment with GUI - use same settings as training!
+        viz_env = MainPlayground(gui=True, sim_steps_per_action=6, use_position_control=True)
         
         for ep in range(num_episodes):
-            state = viz_env.reset()
+            state = viz_env.reset(randomize=False)
             episode_reward = 0
             done = False
             steps = 0
-            max_steps = 10000  # Longer visualization to see walking
+            max_steps = 8000  # Longer visualization to see walking
             
             print(f"Episode {ep+1} - Running for up to {max_steps} steps...")
-            print("Camera will follow the robot...")
             
             while not done and steps < max_steps:
                 # Check if GUI is still connected
@@ -84,10 +151,11 @@ def visualize_checkpoint(agent, num_episodes=1):
                 state_tensor = torch.tensor(state, dtype=torch.float32, device=DEVICE)
                 
                 with torch.no_grad():
-                    action_tensor, _, _ = agent.model.act(state_tensor.unsqueeze(0))
-                    action = action_tensor.cpu().numpy().squeeze()
+                    # Use mean action (no sampling) for smoother visualization
+                    dist, _ = agent.model.forward(state_tensor.unsqueeze(0))
+                    action = dist.mean.cpu().numpy().squeeze()
                 
-                state, reward, done, _ = viz_env.step(action)
+                state, reward, done, info = viz_env.step(action)
                 episode_reward += reward
                 steps += 1
                 
@@ -106,8 +174,8 @@ def visualize_checkpoint(agent, num_episodes=1):
                 # Slower visualization - 30 FPS instead of 240 FPS
                 time.sleep(1./30)
             
-            print(f"Episode {ep+1} done: {steps} steps, reward: {episode_reward:.2f}")
-            print(f"Distance traveled: {base_pos[0]:.2f}m")
+            dist = info.get('distance', 0.0)
+            print(f"Episode {ep+1} done: {steps} steps, reward: {episode_reward:.2f}, dist={dist:.2f}m")
         
         print(f"Visualization complete!\n")
         
@@ -123,15 +191,98 @@ def visualize_checkpoint(agent, num_episodes=1):
                 pass
 
 
+def show_new_record(agent, distance):
+    """Celebrate a new distance record with visualization"""
+    import pybullet as p
+    import time
+    
+    print(f"\n{'*'*45}")
+    print(f"NEW RECORD: {distance:.2f}m!!")
+    print(f"{'*'*45}")
+    
+    viz_env = None
+    try:
+        viz_env = MainPlayground(gui=True, sim_steps_per_action=6, use_position_control=True)
+        state = viz_env.reset(randomize=False)
+        
+        for step in range(5000):
+            if not p.isConnected(viz_env.client_id):
+                break
+            
+            state_t = torch.tensor(state, dtype=torch.float32, device=DEVICE)
+            with torch.no_grad():
+                dist, _ = agent.model.forward(state_t.unsqueeze(0))
+                action = dist.mean.cpu().numpy().squeeze()
+            
+            state, _, done, info = viz_env.step(action)
+            
+            if step % 10 == 0:
+                base_pos, _ = p.getBasePositionAndOrientation(viz_env.robot_id, physicsClientId=viz_env.client_id)
+                p.resetDebugVisualizerCamera(2.5, 30, -20, [base_pos[0], base_pos[1], 0.3], physicsClientId=viz_env.client_id)
+            
+            time.sleep(0.01)
+            if done:
+                break
+        
+        print("Record viz done\n")
+        
+    except Exception as e:
+        print(f"Viz error: {e}")
+    finally:
+        if viz_env is not None:
+            try:
+                if p.isConnected(viz_env.client_id):
+                    viz_env.close()
+            except:
+                pass
+
+
+def find_latest_model():
+    """Find most recent saved model to resume training"""
+    model_files = glob.glob("models/ppo_spotmicro_*.pth")
+    
+    numeric_models = []
+    for f in model_files:
+        try:
+            suffix = f.split('_')[-1].split('.')[0]
+            steps = int(suffix)
+            numeric_models.append((f, steps))
+        except ValueError:
+            continue  # skip non-numeric like BEST.pth
+    
+    if numeric_models:
+        return max(numeric_models, key=lambda x: x[1])[0]
+    return None
+
+
 #Initialization
 def main():
-    #Set gui=False for maximum training speed, use multiple sim steps for faster training
-    env = MainPlayground(gui=False, sim_steps_per_action=4)
+    global SHOW_LIVE_PLOTS, SHOW_AT_CHECKPOINTS, SHOW_NEW_RECORDS
+    
+    # Get user preferences for visualization
+    SHOW_LIVE_PLOTS, SHOW_AT_CHECKPOINTS, SHOW_NEW_RECORDS = ask_user_preferences()
+    
+    #Create output directory
+    os.makedirs("models", exist_ok=True)
+    os.makedirs("plots", exist_ok=True)
+    os.makedirs("data", exist_ok=True)
+    
+    # Start live plotter if enabled
+    plotter = None
+    if SHOW_LIVE_PLOTS:
+        try:
+            plotter = PlotterThread(max_episodes=5000)
+            plotter.start()
+        except Exception as e:
+            print(f"Plotter failed: {e}")
+            plotter = None
+    #Set gui=False for maximum training speed, use position control for stability
+    env = MainPlayground(gui=False, sim_steps_per_action=6, use_position_control=True)
     state=env.reset()
     state_dim=env.state_dim
     action_dim=env.action_dim
     print(f'Environment initialized. State dim={state_dim}, Action dim={action_dim}')
-    print(f'Training optimizations: 4 physics steps per action for {4}x speed boost')
+    print(f'Simulation: {env.sim_steps_per_action}x physics steps per action')
 
     agent = PPOAgent(state_dim, action_dim, DEVICE, HYPERPARAMETERS) # Pass hyperparameters as a single dictionary
     
@@ -150,37 +301,16 @@ def main():
         print("Using standard mode (torch.compile disabled)")
     
     # Try loading existing model to continue training
-    latest_model = None
-    import glob
-    model_files = glob.glob("models/ppo_spotmicro_*.pth")
-    if model_files:
-        # Filter out files with non-numeric suffixes (like BEST)
-        numeric_models = []
-        for f in model_files:
-            try:
-                # Extract the part after last underscore and before .pth
-                suffix = f.split('_')[-1].split('.')[0]
-                timestep = int(suffix)
-                numeric_models.append((f, timestep))
-            except ValueError:
-                # Skip files like ppo_spotmicro_BEST.pth
-                continue
-        
-        if numeric_models:
-            # Get the one with highest timestep number
-            latest_model = max(numeric_models, key=lambda x: x[1])[0]
-            try:
-                agent.model.load_state_dict(torch.load(latest_model, map_location=DEVICE))
-                print(f"Loaded existing model from {latest_model}")
-            except Exception as e:
-                print(f"Couldn't load {latest_model}: {e}")
-                print("Starting fresh training instead")
-                latest_model = None
-        else:
-            print("No timestep-numbered models found, starting from scratch")
-    
-    if not latest_model:
-        print("Starting fresh training from scratch")
+    latest_model = find_latest_model()
+    if latest_model:
+        try:
+            agent.model.load_state_dict(torch.load(latest_model, map_location=DEVICE))
+            print(f"Loaded model: {latest_model}")
+        except Exception as e:
+            print(f"Couldn't load {latest_model}: {e}")
+            print("Starting fresh")
+    else:
+        print("No existing model found, starting from scratch")
     
     buffer = RolloutBuffer(ROLLOUT_STEPS, state_dim, action_dim, DEVICE)
 
@@ -195,9 +325,13 @@ def main():
     
     # Track best model performance
     best_avg_reward = float('-inf')
-    best_model_path = None
+    best_distance = 0.0
 
-    #mMain training loop
+    print("\n" + "="*55)
+    print("TRAINING STARTED")
+    print("="*55 + "\n")
+    
+    #Main training loop
     while num_timesteps < TOTAL_TIMESTEPS:
         #Rollout phase
 
@@ -212,7 +346,7 @@ def main():
             action = action_tensor.cpu().numpy().squeeze() # Squeeze to remove the batch dimension
 
             #Step the environment 
-            next_state, reward, done, _ = env.step(action)
+            next_state, reward, done, info = env.step(action)
 
             #Update metrics
             current_ep_reward+=reward
@@ -224,6 +358,22 @@ def main():
             state_tensor=torch.tensor(state, dtype=torch.float32, device=DEVICE)
 
             if done:
+                episode_dist = info.get('distance', 0.0)
+                survival_time = env.episode_time
+                
+                # Check for new distance record
+                if episode_dist > best_distance:
+                    old_best = best_distance
+                    best_distance = episode_dist
+                    
+                    # Save model for significant improvements (> 0.5m)
+                    if (episode_dist - old_best) > 0.5:
+                        torch.save(agent.model.state_dict(), "models/ppo_spotmicro_BEST.pth")
+                        print(f"*** NEW RECORD: {episode_dist:.2f}m (was {old_best:.2f}m) ***")
+                        
+                        if SHOW_NEW_RECORDS and (episode_dist - old_best) > 1.0:
+                            show_new_record(agent, episode_dist)
+                
                 # Log episode results
                 all_ep_rewards.append(current_ep_reward)
 
@@ -231,10 +381,17 @@ def main():
                 avg_reward=np.mean(all_ep_rewards[-50:])
                 all_avg_rewards.append(avg_reward)
                 
-                #print every 10 episodes so we dont spam console
-                if len(all_ep_rewards) % 10 == 0:
-                    progress = (num_timesteps / TOTAL_TIMESTEPS) * 100
-                    print(f"[{progress:5.1f}%] Episode {len(all_ep_rewards):4d} | This episode: {current_ep_reward:6.2f} | Avg(last 50): {avg_reward:6.2f} | Step: {num_timesteps:,}")
+                # Update live plot if enabled
+                if plotter:
+                    try:
+                        plotter.update(current_ep_reward, episode_dist, survival_time, num_timesteps)
+                    except:
+                        pass
+                
+                #print every episode with distance info
+                ep_num = len(all_ep_rewards)
+                progress = (num_timesteps / TOTAL_TIMESTEPS) * 100
+                print(f"[{progress:5.1f}%] Ep {ep_num:4d} | R={current_ep_reward:7.1f} | Avg={avg_reward:7.1f} | Dist={episode_dist:5.2f}m | T={survival_time:5.1f}s | Best={best_distance:.2f}m")
 
                 #Reset
                 state=env.reset()
@@ -265,43 +422,61 @@ def main():
             current_avg = np.mean(all_ep_rewards[-50:]) if len(all_ep_rewards) >= 50 else np.mean(all_ep_rewards) if all_ep_rewards else float('-inf')
             
             # Save performance metrics
-            import pickle
             data_path = f"data/training_data_{num_timesteps}.pkl"
             with open(data_path, 'wb') as f:
                 pickle.dump({
                     'rewards': all_ep_rewards, 
                     'avg_rewards': all_avg_rewards,
                     'avg_reward_50': current_avg,
-                    'timesteps': num_timesteps
+                    'timesteps': num_timesteps,
+                    'best_distance': best_distance
                 }, f)
             
             # Track best model
             if current_avg > best_avg_reward:
-                improvement = current_avg - best_avg_reward if best_avg_reward != float('-inf') else 0
                 best_avg_reward = current_avg
-                best_model_path = save_path
                 # Save a copy as "best" model with timestamp
                 timestamp = datetime.now().strftime("%d%m%H%M")  # day month hour minute
-                best_save_path = f"models/ppo_spotmicro_BEST_{timestamp}.pth"
-                torch.save(agent.model.state_dict(), best_save_path)
+                torch.save(agent.model.state_dict(), f"models/ppo_spotmicro_BEST_{timestamp}.pth")
                 # Also save without timestamp for easy reference
                 torch.save(agent.model.state_dict(), "models/ppo_spotmicro_BEST.pth")
-                print(f"[CHECKPOINT] Step {num_timesteps:,} | NEW BEST! Avg(50eps): {current_avg:.2f} (+{improvement:.2f}) | Saved: {best_save_path}")
+                print(f"[SAVE] Step {num_timesteps:,} | NEW BEST avg={current_avg:.1f} | dist={best_distance:.2f}m")
             else:
-                print(f"[CHECKPOINT] Step {num_timesteps:,} | Avg(50eps): {current_avg:.2f} | Best: {best_avg_reward:.2f} | Saved: {save_path}")
+                print(f"[SAVE] Step {num_timesteps:,} | avg={current_avg:.1f} | best_dist={best_distance:.2f}m")
             
             # Visualize checkpoint if enabled
-            if VISUALIZE_AT_CHECKPOINTS:
-                visualize_checkpoint(agent, num_episodes=VISUALIZE_EPISODES)
+            if SHOW_AT_CHECKPOINTS:
+                visualize_checkpoint(agent, num_episodes=1)
         
         #print progress every rollout
         if len(all_ep_rewards)>0:
             recent_avg = np.mean(all_ep_rewards[-20:]) if len(all_ep_rewards)>=20 else np.mean(all_ep_rewards)
             total_rollouts = TOTAL_TIMESTEPS // ROLLOUT_STEPS
-            print(f"[ROLLOUT {rollout_count}/{total_rollouts}] Policy updated | Avg(last 20eps): {recent_avg:.2f} | Total episodes: {len(all_ep_rewards)}")
+            print(f"[Rollout {rollout_count}/{total_rollouts}] Updated | Recent20={recent_avg:.1f} | Episodes={len(all_ep_rewards)}")
+    
     env.close()
+    
+    # Save final plot from live plotter
+    if plotter:
+        try:
+            plotter.save("plots/training_live_final.png")
+            plotter.close()
+        except:
+            pass
+    
+    # Print training summary
+    print("\n" + "="*55)
+    print("TRAINING COMPLETE")
+    print("="*55)
+    print(f"Total episodes: {len(all_ep_rewards)}")
+    print(f"Total timesteps: {num_timesteps:,}")
+    print(f"Best distance: {best_distance:.2f}m")
+    print(f"Final avg reward: {all_avg_rewards[-1] if all_avg_rewards else 0:.1f}")
+    print(f"\nBest model: models/ppo_spotmicro_BEST.pth")
+    print("Run demo: python src/demo.py")
+    print("="*55)
 
-    #Plotting to be implemented
+    #Plotting
     plot_rewards(all_ep_rewards, all_avg_rewards)
 
 def plot_rewards(rewards, avg_rewards):
