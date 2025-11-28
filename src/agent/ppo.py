@@ -24,7 +24,9 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
         # num_epochs: The number of times the agent will re-study its recent experiences before gathering new ones.
         self.num_epochs = hyperparameters.get('num_epochs', 10)
         # minibatch_size: The size of the "chunks" the agent breaks its experiences into for studying.
-        self.minibatch_size=hyperparameters.get('minibatch_size',64)        
+        self.minibatch_size=hyperparameters.get('minibatch_size',64)
+        # max_grad_norm: Maximum gradient norm for clipping (prevents exploding gradients)
+        self.max_grad_norm = hyperparameters.get('max_grad_norm', 1.0)        
 
 
         
@@ -129,6 +131,6 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
                 #Gradient descent step
                 self.optimizer.zero_grad() #Clear the gradients
                 total_loss.backward() #Backpropagate the loss
-                #Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5) #Clip the gradients to prevent exploding gradients
+                #Gradient clipping (prevents exploding gradients for stable training)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 self.optimizer.step() #Update the parameters
