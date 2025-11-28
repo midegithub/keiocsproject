@@ -4,12 +4,24 @@ from torch.distributions import Normal
 import numpy as np
 
 class ActorCritic(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_size=384):
-        """Initializes the Actor-Critic model
+    def __init__(self, state_dim, action_dim, hidden_size=512):
+        """Initializes the Actor-Critic model for PMTG residual control.
+        
         Arguments:
-            state_dim (int): Dimension of the state space (here 35 observations)
-            action_dim (int): Dimension of the action space (here 12 torques)
-            hidden_size (int): Dimension of the hidden layers of neurons"""
+            state_dim (int): Dimension of the state space (49 for PMTG observations)
+            action_dim (int): Dimension of the action space (12 residual corrections)
+            hidden_size (int): Dimension of the hidden layers of neurons
+            
+        PMTG Observation Space (49 dims):
+            - Base height (1)
+            - Base orientation quat (4)
+            - Base linear velocity (3)
+            - Base angular velocity (3)
+            - Joint positions (12)
+            - Joint velocities (12)
+            - Gait phase clock: sin(φ), cos(φ) (2)
+            - Reference tracking error (12)
+        """
         
         super(ActorCritic, self).__init__()
         
