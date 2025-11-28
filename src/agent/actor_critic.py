@@ -3,14 +3,68 @@ from torch import nn
 from torch.distributions import Normal
 import numpy as np
 
+
+class RunningNormalizer(nn.Module):
+    """Normalizes observations using running mean and std.
+    This helps training stability by keeping inputs in a good range."""
+    
+    def __init__(self, size, clip=5.0):
+        super().__init__()
+        self.clip = clip
+        
+        # running statistics (not learnable params, just buffers)
+        self.register_buffer('mean', torch.zeros(size))
+        self.register_buffer('var', torch.ones(size))
+        self.register_buffer('count', torch.tensor(1e-4))
+    
+    def update(self, batch):
+        """update running stats with new batch of observations"""
+        if batch.dim() == 1:
+            batch = batch.unsqueeze(0)
+        
+        batch_count = batch.shape[0]
+        
+        # need at least 2 samples for variance
+        if batch_count < 2:
+            batch_mean = batch.mean(dim=0)
+            delta = batch_mean - self.mean
+            total_count = self.count + batch_count
+            self.mean = self.mean + delta * batch_count / total_count
+            self.count = total_count
+            return
+        
+        batch_mean = batch.mean(dim=0)
+        batch_var = batch.var(dim=0, unbiased=False)
+        
+        # welford's online algorithm for stable mean/var computation
+        delta = batch_mean - self.mean
+        total_count = self.count + batch_count
+        
+        self.mean = self.mean + delta * batch_count / total_count
+        
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta ** 2 * self.count * batch_count / total_count
+        self.var = M2 / total_count
+        
+        self.var = torch.clamp(self.var, min=1e-6)
+        self.count = total_count
+    
+    def normalize(self, x):
+        """normalize input using running stats"""
+        normalized = (x - self.mean) / torch.sqrt(self.var + 1e-8)
+        return torch.clamp(normalized, -self.clip, self.clip)
+
+
 class ActorCritic(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_size=512):
+    def __init__(self, state_dim, action_dim, hidden_size=512, normalize_obs=True):
         """Initializes the Actor-Critic model for PMTG residual control.
         
         Arguments:
             state_dim (int): Dimension of the state space (49 for PMTG observations)
             action_dim (int): Dimension of the action space (12 residual corrections)
             hidden_size (int): Dimension of the hidden layers of neurons
+            normalize_obs (bool): Whether to normalize observations using running stats
             
         PMTG Observation Space (49 dims):
             - Base height (1)
@@ -24,6 +78,11 @@ class ActorCritic(nn.Module):
         """
         
         super(ActorCritic, self).__init__()
+        
+        # Observation normalization for training stability
+        self.normalize_obs = normalize_obs
+        if normalize_obs:
+            self.obs_normalizer = RunningNormalizer(state_dim)
         
 
         # bigger network learns better policies
@@ -67,13 +126,20 @@ class ActorCritic(nn.Module):
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.01)
         nn.init.orthogonal_(self.critic.weight, gain=1.0)
 
-    def forward(self, state):
+    def forward(self, state, update_norm=False):
         """Performs a forward pass through the Actor-Critic network.
         Arguments:
             state (torch.Tensor): The state of the environment
+            update_norm (bool): Whether to update running normalization stats
         Returns:
             the probability distribution of the actions (Actor)
             the estimated value of the state (Critic)"""
+        
+        # Normalize observations if enabled (helps training stability)
+        if self.normalize_obs:
+            if update_norm and self.training:
+                self.obs_normalizer.update(state)
+            state = self.obs_normalizer.normalize(state)
         
         shared_features=self.shared_layers(state)
 
@@ -102,7 +168,7 @@ class ActorCritic(nn.Module):
         Get an action from the policy (for rollout pahse).
         Includes gradients for log_prob and value, but no gradients for the state."""
 
-        dist, value = self.forward(state)
+        dist, value = self.forward(state, update_norm=True)
 
         action = dist.sample() # Sample an action from the distribution
 
@@ -117,7 +183,7 @@ class ActorCritic(nn.Module):
         Get values for a given state and action. for update phase.
         This is the old policy's view of the data, we need new log_probs and values."""
 
-        dist, value = self.forward(state)
+        dist, value = self.forward(state, update_norm=False)
 
         #Get the logproba of the action
         log_prob = dist.log_prob(action).sum(dim=-1)
