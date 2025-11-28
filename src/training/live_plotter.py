@@ -1,11 +1,7 @@
 """
 Live plotting module for training visualization.
-Separated from main training loop to avoid blocking issues.
+Shows: reward, distance, survival time graphs + stats
 
-Key features:
-- Shows "Loading..." state until data arrives
-- Robust error handling to prevent crashes
-- Non-blocking updates
 """
 
 import matplotlib
@@ -14,48 +10,53 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import deque
 import threading
-import time
-import queue
 
 
 class LivePlotter:
-    """Non-blocking live plotter for training metrics with loading state."""
+    """Non-blocking live plotter for training metrics"""
     
     def __init__(self, max_episodes=1000):
         """
-        Initialize the live plotter with a loading screen.
+        Initialize the live plotter
         
         Args:
-            max_episodes: Maximum number of episodes to display at once
+            max_episodes: Maximum number of episodes to display
         """
         self.max_episodes = max_episodes
+        
+        # Data storage
         self.episode_rewards = deque(maxlen=max_episodes)
-        self.avg_rewards = deque(maxlen=max_episodes)
+        self.episode_distances = deque(maxlen=max_episodes)
+        self.episode_times = deque(maxlen=max_episodes)
         self.episodes = deque(maxlen=max_episodes)
-        self.best_avg_reward = float('-inf')
+        
+        # Best stats (independent)
+        self.best_reward = float('-inf')
+        self.best_distance = 0.0
+        self.best_time = 0.0
+        
+        # Stats of best distance robot
+        self.best_dist_robot_reward = 0.0
+        self.best_dist_robot_time = 0.0
+        self.best_dist_robot_distance = 0.0
+        
         self.num_timesteps = 0
         
-        # Thread-safe lock for updating data
+        # Thread-safe lock
         self.lock = threading.Lock()
-        
-        # Flag to track if we have data
         self.has_data = False
         
-        # Create figure and axes
+        # Create figure with 4 subplots (2x2)
         try:
             self.fig, self.axes = plt.subplots(2, 2, figsize=(14, 9))
-            self.fig.suptitle('PPO Training Progress', fontsize=16, fontweight='bold')
+            self.fig.suptitle('Training Progress - Goal: 100m straight walk!', fontsize=14, fontweight='bold')
             
-            # Show loading screen initially
             self._show_loading_screen()
             
-            # Show the plot window
             plt.ion()
             plt.tight_layout()
             self.fig.canvas.draw()
             plt.show(block=False)
-            
-            # Force a window update
             self.fig.canvas.flush_events()
             
         except Exception as e:
@@ -65,12 +66,11 @@ class LivePlotter:
         
         self.is_closed = False
         
-        # Connect close event
         if self.fig is not None:
             self.fig.canvas.mpl_connect('close_event', self._on_close)
     
     def _show_loading_screen(self):
-        """Display a loading message on all plots."""
+        """Display loading message"""
         if self.axes is None:
             return
             
@@ -80,187 +80,180 @@ class LivePlotter:
             ax.set_ylim(0, 1)
             ax.axis('off')
             
-            if i == 0:
-                ax.text(0.5, 0.5, 'LOADING...\n\nWaiting for training data\n\nThis may take a moment',
-                       ha='center', va='center', fontsize=14,
-                       bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8))
-            elif i == 1:
-                ax.text(0.5, 0.5, 'Training in progress...\n\nRewards will appear here\nonce episodes complete',
-                       ha='center', va='center', fontsize=11,
-                       bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.8))
-            elif i == 2:
-                ax.text(0.5, 0.5, 'Recent performance\nwill show here',
-                       ha='center', va='center', fontsize=11,
-                       bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgreen', alpha=0.8))
-            elif i == 3:
-                ax.text(0.5, 0.5, 'Statistics\nwill show here',
-                       ha='center', va='center', fontsize=11,
-                       bbox=dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.8))
-    
-    def _setup_axes(self):
-        """Setup axis labels and styling."""
-        if self.axes is None:
-            return
+            messages = [
+                'REWARD GRAPH\n\nWaiting for data...',
+                'DISTANCE GRAPH\n\nWaiting for data...',
+                'SURVIVAL TIME GRAPH\n\nWaiting for data...',
+                'STATISTICS\n\nWaiting for data...'
+            ]
+            colors = ['lightblue', 'lightgreen', 'lightyellow', 'wheat']
             
-        # Plot 1: Episode Rewards
-        self.axes[0, 0].set_xlabel('Episode', fontsize=10)
-        self.axes[0, 0].set_ylabel('Total Reward', fontsize=10)
-        self.axes[0, 0].set_title('Episode Rewards Over Time', fontsize=11, fontweight='bold')
-        self.axes[0, 0].grid(True, alpha=0.3, linestyle='--')
-        
-        # Plot 2: Moving Average Trend
-        self.axes[0, 1].set_xlabel('Episode', fontsize=10)
-        self.axes[0, 1].set_ylabel('Avg Reward (50eps)', fontsize=10)
-        self.axes[0, 1].set_title('Training Progress (50-episode average)', fontsize=11, fontweight='bold')
-        self.axes[0, 1].grid(True, alpha=0.3, linestyle='--')
-        
-        # Plot 3: Recent Performance
-        self.axes[1, 0].set_xlabel('Recent Episodes', fontsize=10)
-        self.axes[1, 0].set_ylabel('Reward', fontsize=10)
-        self.axes[1, 0].set_title('Last 100 Episodes', fontsize=11, fontweight='bold')
-        self.axes[1, 0].grid(True, alpha=0.3, linestyle='--')
-        
-        # Plot 4: Statistics (text only)
-        self.axes[1, 1].axis('off')
+            ax.text(0.5, 0.5, messages[i], ha='center', va='center', fontsize=12,
+                   bbox=dict(boxstyle='round,pad=0.5', facecolor=colors[i], alpha=0.8))
     
     def _on_close(self, event):
-        """Handle plot window close event."""
+        """Handle plot window close"""
         self.is_closed = True
     
-    def update(self, episode_reward, avg_reward, num_timesteps, best_avg_reward=None):
+    def update(self, episode_reward, distance, survival_time, num_timesteps):
         """
-        Update the plot with new data.
+        Update the plot with new episode data
         
         Args:
-            episode_reward: Reward for the latest episode
-            avg_reward: Moving average reward
-            num_timesteps: Total training timesteps
-            best_avg_reward: Best average reward seen so far
+            episode_reward: Total reward for the episode
+            distance: Distance traveled (meters)
+            survival_time: How long robot survived (seconds)
+            num_timesteps: Total training timesteps so far
         """
         if self.is_closed or self.fig is None:
             return False
         
         with self.lock:
             self.episode_rewards.append(episode_reward)
-            self.avg_rewards.append(avg_reward)
+            self.episode_distances.append(distance)
+            self.episode_times.append(survival_time)
             self.episodes.append(len(self.episode_rewards))
             self.num_timesteps = num_timesteps
             self.has_data = True
             
-            if best_avg_reward is not None:
-                self.best_avg_reward = best_avg_reward
+            # Update best stats (independent)
+            if episode_reward > self.best_reward:
+                self.best_reward = episode_reward
+            if distance > self.best_distance:
+                self.best_distance = distance
+                # Also save this robot's other stats
+                self.best_dist_robot_reward = episode_reward
+                self.best_dist_robot_time = survival_time
+                self.best_dist_robot_distance = distance
+            if survival_time > self.best_time:
+                self.best_time = survival_time
         
-        # Update plots (non-blocking)
         try:
             self._redraw()
             return True
         except Exception as e:
-            # Don't crash training if plotting fails
             return False
     
     def _redraw(self):
-        """Redraw all plots with current data."""
-        if self.fig is None or self.axes is None:
-            return
-            
-        if not self.has_data or len(self.episode_rewards) == 0:
+        """Redraw all plots"""
+        if self.fig is None or self.axes is None or not self.has_data:
             return
         
         with self.lock:
             episodes = list(self.episodes)
-            ep_rewards = list(self.episode_rewards)
-            avg_rewards = list(self.avg_rewards)
-            best_reward = self.best_avg_reward
-            timesteps = self.num_timesteps
+            rewards = list(self.episode_rewards)
+            distances = list(self.episode_distances)
+            times = list(self.episode_times)
+        
+        if len(episodes) < 2:
+            return
         
         try:
             # Clear all axes
             for ax in self.axes.flat:
                 ax.clear()
             
-            # Re-setup axes
-            self._setup_axes()
+            # ===== PLOT 1: REWARD GRAPH =====
+            ax1 = self.axes[0, 0]
+            ax1.plot(episodes, rewards, 'b-', alpha=0.4, linewidth=0.8, label='Episode')
+            # Moving average
+            if len(rewards) >= 20:
+                avg = np.convolve(rewards, np.ones(20)/20, mode='valid')
+                ax1.plot(episodes[19:], avg, 'r-', linewidth=2, label='Avg(20)')
+            ax1.axhline(y=0, color='gray', linestyle=':', alpha=0.5)
+            ax1.set_xlabel('Episode')
+            ax1.set_ylabel('Reward')
+            ax1.set_title('Episode Rewards', fontweight='bold')
+            ax1.legend(loc='upper left', fontsize=8)
+            ax1.grid(True, alpha=0.3)
             
-            # Plot 1: Episode Rewards with moving average
-            self.axes[0, 0].plot(episodes, ep_rewards, 'b-', alpha=0.3, linewidth=0.8, label='Episode Reward')
-            if len(avg_rewards) > 0:
-                self.axes[0, 0].plot(episodes, avg_rewards, 'r-', linewidth=2.5, label='Avg (50eps)', zorder=5)
-            self.axes[0, 0].axhline(y=0, color='g', linestyle=':', alpha=0.5, linewidth=1.5)
-            self.axes[0, 0].legend(loc='upper left', fontsize=9)
+            # ===== PLOT 2: DISTANCE GRAPH =====
+            ax2 = self.axes[0, 1]
+            ax2.plot(episodes, distances, 'g-', alpha=0.4, linewidth=0.8, label='Episode')
+            # Moving average
+            if len(distances) >= 20:
+                avg = np.convolve(distances, np.ones(20)/20, mode='valid')
+                ax2.plot(episodes[19:], avg, 'darkgreen', linewidth=2, label='Avg(20)')
+            # Best distance line
+            ax2.axhline(y=self.best_distance, color='red', linestyle='--', linewidth=1.5, 
+                       label=f'Best: {self.best_distance:.2f}m')
+            # Goal lines
+            ax2.axhline(y=100, color='gold', linestyle='-', linewidth=2, alpha=0.7, label='GOAL: 100m')
+            ax2.set_xlabel('Episode')
+            ax2.set_ylabel('Distance (m)')
+            ax2.set_title('Distance Traveled', fontweight='bold')
+            ax2.legend(loc='upper left', fontsize=8)
+            ax2.grid(True, alpha=0.3)
             
-            # Plot 2: Moving Average Trend
-            if len(avg_rewards) > 5:
-                self.axes[0, 1].plot(episodes, avg_rewards, 'r-', linewidth=2.5)
-                if best_reward != float('-inf'):
-                    self.axes[0, 1].axhline(y=best_reward, color='g', linestyle='--', 
-                                           linewidth=2, label=f'Best: {best_reward:.1f}')
-                self.axes[0, 1].axhline(y=0, color='gray', linestyle=':', alpha=0.5, linewidth=1.5)
-                self.axes[0, 1].legend(loc='upper left', fontsize=9)
-            else:
-                self.axes[0, 1].text(0.5, 0.5, 'Waiting for more data...',
-                                    ha='center', va='center', fontsize=12)
+            # ===== PLOT 3: SURVIVAL TIME GRAPH =====
+            ax3 = self.axes[1, 0]
+            ax3.plot(episodes, times, 'purple', alpha=0.4, linewidth=0.8, label='Episode')
+            # Moving average
+            if len(times) >= 20:
+                avg = np.convolve(times, np.ones(20)/20, mode='valid')
+                ax3.plot(episodes[19:], avg, 'darkviolet', linewidth=2, label='Avg(20)')
+            ax3.axhline(y=self.best_time, color='red', linestyle='--', linewidth=1.5,
+                       label=f'Best: {self.best_time:.1f}s')
+            ax3.set_xlabel('Episode')
+            ax3.set_ylabel('Time (seconds)')
+            ax3.set_title('Survival Time', fontweight='bold')
+            ax3.legend(loc='upper left', fontsize=8)
+            ax3.grid(True, alpha=0.3)
             
-            # Plot 3: Recent Performance (last 100 episodes)
-            if len(ep_rewards) > 5:
-                recent_count = min(100, len(ep_rewards))
-                recent_rewards = ep_rewards[-recent_count:]
-                recent_eps = list(range(len(recent_rewards)))
-                recent_mean = np.mean(recent_rewards)
-                
-                self.axes[1, 0].plot(recent_eps, recent_rewards, 'b-', alpha=0.6, linewidth=1.2)
-                self.axes[1, 0].axhline(y=recent_mean, color='r', linestyle='--', 
-                                       linewidth=2, label=f'Mean: {recent_mean:.1f}')
-                self.axes[1, 0].legend(loc='upper left', fontsize=9)
-            else:
-                self.axes[1, 0].text(0.5, 0.5, 'Waiting for more episodes...',
-                                    ha='center', va='center', fontsize=12)
+            # ===== PLOT 4: STATISTICS =====
+            ax4 = self.axes[1, 1]
+            ax4.axis('off')
             
-            # Plot 4: Training Statistics
-            current_avg = avg_rewards[-1] if avg_rewards else 0
-            recent_avg = np.mean(ep_rewards[-20:]) if len(ep_rewards) >= 20 else np.mean(ep_rewards) if ep_rewards else 0
+            # Recent averages
+            recent_reward = np.mean(rewards[-50:]) if len(rewards) >= 50 else np.mean(rewards)
+            recent_dist = np.mean(distances[-50:]) if len(distances) >= 50 else np.mean(distances)
+            recent_time = np.mean(times[-50:]) if len(times) >= 50 else np.mean(times)
             
-            # Determine training status
-            if len(ep_rewards) < 10:
-                status = "🔄 Warming up..."
-            elif current_avg > 0:
-                status = "✅ Positive rewards!"
-            elif current_avg > -50:
-                status = "📈 Improving..."
-            else:
-                status = "⏳ Learning..."
-            
-            stats_text = f"""TRAINING STATISTICS
-
-Episodes Completed: {len(ep_rewards)}
-Total Steps: {timesteps:,}
-
-Current Avg (50): {current_avg:.2f}
-Recent Avg (20): {recent_avg:.2f}
-Best Avg Ever: {best_reward:.2f}
-
-Status: {status}
+            stats_text = f"""
+╔══════════════════════════════════════════╗
+║          TRAINING STATISTICS             ║
+╠══════════════════════════════════════════╣
+║  Episodes: {len(episodes):>6}                       ║
+║  Timesteps: {self.num_timesteps:>10,}                ║
+╠══════════════════════════════════════════╣
+║         BEST STATS (Independent)         ║
+╠──────────────────────────────────────────╣
+║  Best Reward:    {self.best_reward:>10.2f}             ║
+║  Best Distance:  {self.best_distance:>10.2f} m           ║
+║  Best Survival:  {self.best_time:>10.1f} s           ║
+╠══════════════════════════════════════════╣
+║     BEST DISTANCE ROBOT's FULL STATS     ║
+╠──────────────────────────────────────────╣
+║  Distance:  {self.best_dist_robot_distance:>8.2f} m                 ║
+║  Reward:    {self.best_dist_robot_reward:>8.2f}                   ║
+║  Survived:  {self.best_dist_robot_time:>8.1f} s                 ║
+╠══════════════════════════════════════════╣
+║           RECENT AVERAGES (50ep)         ║
+╠──────────────────────────────────────────╣
+║  Avg Reward:   {recent_reward:>8.2f}                 ║
+║  Avg Distance: {recent_dist:>8.2f} m               ║
+║  Avg Survival: {recent_time:>8.1f} s               ║
+╚══════════════════════════════════════════╝
 """
             
-            self.axes[1, 1].text(0.1, 0.5, stats_text, fontsize=11, 
-                                verticalalignment='center', family='monospace',
-                                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+            ax4.text(0.05, 0.95, stats_text, fontsize=9, family='monospace',
+                    verticalalignment='top', transform=ax4.transAxes,
+                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
             
-            # Update the figure title with progress
-            progress_pct = (timesteps / 300000) * 100 if timesteps else 0
-            self.fig.suptitle(f'PPO Training Progress - {progress_pct:.1f}% Complete', 
-                            fontsize=16, fontweight='bold')
+            # Update title with progress
+            progress = (self.num_timesteps / 5_000_000) * 100
+            self.fig.suptitle(f'Training Progress - {progress:.1f}% | Best Distance: {self.best_distance:.2f}m / 100m Goal', 
+                            fontsize=14, fontweight='bold')
             
-            # Adjust layout and redraw
             plt.tight_layout()
             self.fig.canvas.draw_idle()
             self.fig.canvas.flush_events()
             
         except Exception as e:
-            # Silently ignore plotting errors to not disrupt training
-            pass
+            pass  # Don't crash training if plotting fails
     
     def close(self):
-        """Close the plot window."""
+        """Close the plot window"""
         if not self.is_closed and self.fig is not None:
             try:
                 plt.close(self.fig)
@@ -269,10 +262,9 @@ Status: {status}
             self.is_closed = True
     
     def save(self, filepath):
-        """Save the current plot to file."""
+        """Save the current plot to file"""
         if self.fig is None:
             return
-            
         try:
             self.fig.savefig(filepath, dpi=150, bbox_inches='tight')
             print(f"Plot saved to {filepath}")
@@ -281,39 +273,37 @@ Status: {status}
 
 
 class PlotterThread:
-    """Wrapper to run plotter - handles initialization safely."""
+    """Wrapper to run plotter safely"""
     
     def __init__(self, max_episodes=1000):
         self.plotter = None
         self.max_episodes = max_episodes
         self.started = False
-        self._init_error = None
     
     def start(self):
-        """Start the plotter in main thread (matplotlib requirement)."""
+        """Start the plotter"""
         if not self.started:
             try:
                 print("Initializing live plotter...")
                 self.plotter = LivePlotter(max_episodes=self.max_episodes)
                 self.started = True
-                print("Live plotter ready - window should appear shortly")
+                print("Live plotter ready!")
             except Exception as e:
-                self._init_error = str(e)
                 print(f"Warning: Could not initialize plotter: {e}")
                 self.plotter = None
     
-    def update(self, episode_reward, avg_reward, num_timesteps, best_avg_reward=None):
-        """Update plot with new data."""
+    def update(self, episode_reward, distance, survival_time, num_timesteps):
+        """Update plot with new data"""
         if self.plotter and self.started:
-            return self.plotter.update(episode_reward, avg_reward, num_timesteps, best_avg_reward)
+            return self.plotter.update(episode_reward, distance, survival_time, num_timesteps)
         return True
     
     def close(self):
-        """Close the plotter."""
+        """Close the plotter"""
         if self.plotter:
             self.plotter.close()
     
     def save(self, filepath):
-        """Save current plot."""
+        """Save current plot"""
         if self.plotter:
             self.plotter.save(filepath)
