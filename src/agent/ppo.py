@@ -26,13 +26,13 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
         # minibatch_size: The size of the "chunks" the agent breaks its experiences into for studying.
         self.minibatch_size=hyperparameters.get('minibatch_size',64)
         # max_grad_norm: Maximum gradient norm for clipping (prevents exploding gradients)
-        self.max_grad_norm = hyperparameters.get('max_grad_norm', 1.0)        
+        self.max_grad_norm = hyperparameters.get('max_grad_norm', 0.5)        
 
 
         
         # Initialize the actor-critic network
         self.model=ActorCritic(state_dim, action_dim).to(device)
-        self.optimizer=optim.Adam(self.model.parameters(), lr=self.lr) # Adam optimizer with the learning rate
+        self.optimizer=optim.Adam(self.model.parameters(), lr=self.lr, eps=1e-5) # Adam optimizer with eps for numerical stability
         # Adam optimizer is a variant of the gradient descent optimizer that is more efficient and stable.
 
     def compute_advantages_and_returns(self, buffer, last_value, last_done):
@@ -81,9 +81,12 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
         Iterates over the data for num_epochs times, and updates the actor-critic network.
         """
 
-        data_generator = buffer.get_minibatch_generator(advantages, returns, self.minibatch_size)
+        # Normalize advantages (helps with training stability)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
         for _ in range(self.num_epochs): #Loop for the number of epochs
+            # Get minibatch generator (reshuffles each epoch)
+            data_generator = buffer.get_minibatch_generator(advantages, returns, self.minibatch_size)
             for batch in data_generator:
                 (
                     batch_states,
@@ -118,8 +121,15 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
                 #We use -min because optimisers minimise. but we want to maximise
                 policy_loss=-torch.min(surr1, surr2).mean()
 
-                # LVF
-                value_loss=0.5*((new_values-batch_returns)**2).mean()
+                # LVF with value clipping (can help stability)
+                value_clipped = batch_old_values + torch.clamp(
+                    new_values - batch_old_values,
+                    -self.clip_epsilon,
+                    self.clip_epsilon
+                )
+                value_loss_unclipped = (new_values - batch_returns) ** 2
+                value_loss_clipped = (value_clipped - batch_returns) ** 2
+                value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
                 # Entropy bonus
 
