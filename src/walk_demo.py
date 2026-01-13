@@ -9,6 +9,7 @@ import pybullet_data
 import time
 import os
 import numpy as np
+from playground.main_playground import GaitGenerator
 
 def main():
     print("="*70)
@@ -69,13 +70,12 @@ def main():
     
     print(f"\nFound {len(joint_indices)} actuated joints")
     
-    # Initialize to Spot-like bent-leg standing pose
-    # All legs use -0.7 (the working hip angle!)
+    # Initialize to the same rest pose used during PPO training
     standing_pose = [
-        0.0, -0.7, 1.4,   # URDF front left (becomes world rear after 180°)
-        0.0, -0.7, 1.4,   # URDF front right (becomes world rear)
-        0.0, -0.7, 1.4,   # URDF rear left (becomes world FRONT x+)
-        0.0, -0.7, 1.4    # URDF rear right (becomes world FRONT x+)
+        0.0, -0.89, 1.30,   # URDF front left (becomes world rear after 180°)
+        0.0, -0.89, 1.30,   # URDF front right (becomes world rear)
+        0.0, -0.89, 1.30,   # URDF rear left (becomes world FRONT x+)
+        0.0, -0.89, 1.30    # URDF rear right (becomes world FRONT x+)
     ]
     for i, joint_idx in enumerate(joint_indices):
         p.resetJointState(robot_id, joint_idx, standing_pose[i], 0)
@@ -83,61 +83,22 @@ def main():
     print("\nStarting deterministic walk...")
     print("Gait: Trotting (diagonal pairs move together)")
     
-    # Walking parameters (FIXED - deterministic)
-    t = 0.0
+    gait = GaitGenerator("trot")
     dt = 1./240.
-    frequency = 1.0  # 1 Hz walking frequency
-    
-    # Gait parameters - Spot-like bent-leg walking
-    # Symmetric hip center for balanced gait
-    shoulder_center = 0.0
-    hip_center = -0.7         # Same for all legs - the working angle!
-    hip_amplitude = 0.4       # Swing range for leg movement
-    knee_stance = 1.6         # Bent when supporting weight (~92°)
-    knee_swing = 1.2          # Less bent when lifting leg (~69°)
+    t = 0.0
+    gait_velocity = 0.8
+    gait_period = 0.4
     
     step_count = 0
     
     try:
         while True:
-            # Calculate gait for each leg
-            # Trotting gait: FL+RR together, FR+RL together (180° out of phase)
-            phase_FL = 2 * np.pi * frequency * t
-            phase_FR = phase_FL + np.pi
-            phase_RL = phase_FR
-            phase_RR = phase_FL
-            
-            # Generate joint angles for each leg
-            # All legs use same hip center for symmetric gait
-            gait_angles = []
-            
-            # URDF Front Left (becomes world rear after 180° rotation)
-            gait_angles.extend([
-                shoulder_center,
-                hip_center + hip_amplitude * np.sin(phase_FL),
-                knee_swing if np.sin(phase_FL) > 0 else knee_stance
-            ])
-            
-            # URDF Front Right (becomes world rear)
-            gait_angles.extend([
-                shoulder_center,
-                hip_center + hip_amplitude * np.sin(phase_FR),
-                knee_swing if np.sin(phase_FR) > 0 else knee_stance
-            ])
-            
-            # URDF Rear Left (becomes world FRONT x+ after 180° rotation)
-            gait_angles.extend([
-                shoulder_center,
-                hip_center + hip_amplitude * np.sin(phase_RL),
-                knee_swing if np.sin(phase_RL) > 0 else knee_stance
-            ])
-            
-            # URDF Rear Right (becomes world FRONT x+)
-            gait_angles.extend([
-                shoulder_center,
-                hip_center + hip_amplitude * np.sin(phase_RR),
-                knee_swing if np.sin(phase_RR) > 0 else knee_stance
-            ])
+            foot_positions = gait.get_foot_positions(t, velocity=gait_velocity, period=gait_period)
+            joint_targets = standing_pose.copy()
+            for leg in range(4):
+                base_idx = leg * 3
+                joint_targets[base_idx + 1] += foot_positions[leg, 0] * 2.0
+                joint_targets[base_idx + 2] += foot_positions[leg, 1] * 3.0
             
             # Apply joint angles with position control
             for i, joint_idx in enumerate(joint_indices):
@@ -145,7 +106,7 @@ def main():
                     robot_id,
                     joint_idx,
                     controlMode=p.POSITION_CONTROL,
-                    targetPosition=gait_angles[i],
+                    targetPosition=joint_targets[i],
                     force=50.0,
                     positionGain=0.3,
                     velocityGain=1.0

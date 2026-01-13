@@ -8,6 +8,9 @@ import pickle
 from pathlib import Path
 from datetime import datetime
 
+if hasattr(torch, "set_float32_matmul_precision"):
+    torch.set_float32_matmul_precision("high")
+
 # Add src directory to Python path
 src_path = Path(__file__).parent.parent
 sys.path.insert(0, str(src_path))
@@ -18,30 +21,32 @@ from agent.ppo import PPOAgent
 from agent.buffer import RolloutBuffer
 from training.live_plotter import PlotterThread
 
-#Configuration
+# Configuration
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Use GPU if available, otherwise use CPU
-print(f"Using device: {DEVICE}")
+# Force CPU usage for faster rollouts in single-process environments
+# GPU is often slower due to transfer overhead when stepping environment one by one
+DEVICE = torch.device("cpu")
+print(f"Using device: {DEVICE} (Forced CPU for faster rollouts)")
 
-TOTAL_TIMESTEPS = 5_000_000 # Enough for 100m goal
-ROLLOUT_STEPS = 4096 # Larger rollouts = better GPU utilization and faster training
-MINIBATCH_SIZE = 128 # Larger batches = more efficient GPU usage
-NUM_EPOCHS = 8 # Passes over collected data
-SAVE_INTERVAL = 4 # Save more frequently to track best model
+TOTAL_TIMESTEPS = 3_000_000 # Enough for 100m goal with denser updates
+ROLLOUT_STEPS = 2048 # Longer rollouts stabilize GAE with residual control
+MINIBATCH_SIZE = 128 # Slightly larger batches for better gradient estimates
+NUM_EPOCHS = 5 # A bit more passes over fresh data
+SAVE_INTERVAL = 10 # Save a little more often for analysis
 
 # Visualization settings (will be set by user at start)
 SHOW_LIVE_PLOTS = True
 SHOW_AT_CHECKPOINTS = False
 SHOW_NEW_RECORDS = False
 
-# Optimized hyperparameters for locomotion learning
+# STABLE hyperparameters - tested for locomotion
 HYPERPARAMETERS = {
-    'lr': 3e-4, # Standard PPO learning rate
+    'lr': 1e-4, # LOW learning rate = stable learning
     'gamma': 0.99, # Standard discount factor
     'lambda_gae': 0.95, # GAE parameter
-    'clip_epsilon': 0.2, # PPO clipping
-    'v_coef': 0.5, # Balanced value function weight
-    'entropy_coef': 0.015, # Increased for more exploration
+    'clip_epsilon': 0.2, # Matches PPO defaults, lets policy improve faster
+    'v_coef': 1.0, # Higher value weight = better value learning
+    'entropy_coef': 3e-4, # Encourage exploration without destabilizing gait
     'num_epochs': NUM_EPOCHS,
     'minibatch_size': MINIBATCH_SIZE,
     'max_grad_norm': 0.5 # Gradient clipping
@@ -133,6 +138,15 @@ def visualize_checkpoint(agent, num_episodes=1):
         # Create temporary environment with GUI - use same settings as training!
         viz_env = MainPlayground(gui=True, sim_steps_per_action=6, use_position_control=True)
         
+        # Ensure ground plane is visible - reset camera to show it
+        p.resetDebugVisualizerCamera(
+            cameraDistance=3.0,
+            cameraYaw=45,
+            cameraPitch=-25,
+            cameraTargetPosition=[0, 0, 0],
+            physicsClientId=viz_env.client_id
+        )
+        
         for ep in range(num_episodes):
             state = viz_env.reset(randomize=False)
             episode_reward = 0
@@ -163,11 +177,12 @@ def visualize_checkpoint(agent, num_episodes=1):
                 if steps % 10 == 0:
                     base_pos, _ = p.getBasePositionAndOrientation(viz_env.robot_id, physicsClientId=viz_env.client_id)
                     # Camera follows robot: distance=2.5m, yaw=30deg, pitch=-20deg
+                    # Keep camera slightly elevated to see ground
                     p.resetDebugVisualizerCamera(
                         cameraDistance=2.5,
                         cameraYaw=30,
                         cameraPitch=-20,
-                        cameraTargetPosition=[base_pos[0], base_pos[1], 0.3],
+                        cameraTargetPosition=[base_pos[0], base_pos[1], 0.15],
                         physicsClientId=viz_env.client_id
                     )
                 
@@ -203,6 +218,16 @@ def show_new_record(agent, distance):
     viz_env = None
     try:
         viz_env = MainPlayground(gui=True, sim_steps_per_action=6, use_position_control=True)
+        
+        # Ensure ground plane is visible
+        p.resetDebugVisualizerCamera(
+            cameraDistance=3.0,
+            cameraYaw=45,
+            cameraPitch=-25,
+            cameraTargetPosition=[0, 0, 0],
+            physicsClientId=viz_env.client_id
+        )
+        
         state = viz_env.reset(randomize=False)
         
         for step in range(5000):
@@ -218,7 +243,7 @@ def show_new_record(agent, distance):
             
             if step % 10 == 0:
                 base_pos, _ = p.getBasePositionAndOrientation(viz_env.robot_id, physicsClientId=viz_env.client_id)
-                p.resetDebugVisualizerCamera(2.5, 30, -20, [base_pos[0], base_pos[1], 0.3], physicsClientId=viz_env.client_id)
+                p.resetDebugVisualizerCamera(2.5, 30, -20, [base_pos[0], base_pos[1], 0.15], physicsClientId=viz_env.client_id)
             
             time.sleep(0.01)
             if done:
@@ -277,7 +302,8 @@ def main():
             print(f"Plotter failed: {e}")
             plotter = None
     #Set gui=False for maximum training speed, use position control for stability
-    env = MainPlayground(gui=False, sim_steps_per_action=6, use_position_control=True)
+    # Use 24 physics steps per action = MUCH faster training
+    env = MainPlayground(gui=False, sim_steps_per_action=24, use_position_control=True)
     state=env.reset()
     state_dim=env.state_dim
     action_dim=env.action_dim
@@ -317,6 +343,8 @@ def main():
     #Logging
     all_ep_rewards=[]
     all_avg_rewards=[]
+    all_ep_distances=[]
+    all_ep_times=[]
     current_ep_reward=0
     state_tensor=torch.tensor(state, dtype=torch.float32, device=DEVICE) 
     # The tensor is a multi-dimensional array of numbers used for calculations on GPU or CPU.
@@ -360,6 +388,7 @@ def main():
             if done:
                 episode_dist = info.get('distance', 0.0)
                 survival_time = env.episode_time
+                target_vel = info.get('target_velocity', getattr(env, 'target_velocity', 0.6))
                 
                 # Check for new distance record
                 if episode_dist > best_distance:
@@ -376,6 +405,8 @@ def main():
                 
                 # Log episode results
                 all_ep_rewards.append(current_ep_reward)
+                all_ep_distances.append(episode_dist)
+                all_ep_times.append(survival_time)
 
                 #Calculate and log moving average (for smooth plotting)
                 avg_reward=np.mean(all_ep_rewards[-50:])
@@ -388,10 +419,16 @@ def main():
                     except:
                         pass
                 
-                #print every episode with distance info
+                #print every 10th episode to reduce I/O overhead
                 ep_num = len(all_ep_rewards)
                 progress = (num_timesteps / TOTAL_TIMESTEPS) * 100
-                print(f"[{progress:5.1f}%] Ep {ep_num:4d} | R={current_ep_reward:7.1f} | Avg={avg_reward:7.1f} | Dist={episode_dist:5.2f}m | T={survival_time:5.1f}s | Best={best_distance:.2f}m")
+                if ep_num % 10 == 0 or episode_dist > best_distance * 0.9:  # Print every 10th or near-record
+                    print(
+                        f"[{progress:5.1f}%] Ep {ep_num:4d} | "
+                        f"R={current_ep_reward:7.1f} | Avg={avg_reward:7.1f} | "
+                        f"Dist={episode_dist:5.2f}m | T={survival_time:5.1f}s | "
+                        f"Best={best_distance:.2f}m | VelTgt={target_vel:.2f}m/s"
+                    )
 
                 #Reset
                 state=env.reset()
@@ -427,10 +464,28 @@ def main():
                 pickle.dump({
                     'rewards': all_ep_rewards, 
                     'avg_rewards': all_avg_rewards,
+                    'distances': all_ep_distances,
+                    'times': all_ep_times,
                     'avg_reward_50': current_avg,
                     'timesteps': num_timesteps,
                     'best_distance': best_distance
                 }, f)
+            
+            # Save training plot at each checkpoint
+            if len(all_ep_rewards) > 0:
+                try:
+                    fig = plot_rewards(all_ep_rewards, all_avg_rewards, all_ep_distances, 
+                                      all_ep_times, num_timesteps, best_distance)
+                    plot_path = f"plots/training_progress_{num_timesteps}.png"
+                    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig)
+                    # Also save as latest
+                    fig = plot_rewards(all_ep_rewards, all_avg_rewards, all_ep_distances, 
+                                      all_ep_times, num_timesteps, best_distance)
+                    fig.savefig("plots/training_latest.png", dpi=150, bbox_inches='tight')
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"Warning: Could not save plot: {e}")
             
             # Track best model
             if current_avg > best_avg_reward:
@@ -440,9 +495,9 @@ def main():
                 torch.save(agent.model.state_dict(), f"models/ppo_spotmicro_BEST_{timestamp}.pth")
                 # Also save without timestamp for easy reference
                 torch.save(agent.model.state_dict(), "models/ppo_spotmicro_BEST.pth")
-                print(f"[SAVE] Step {num_timesteps:,} | NEW BEST avg={current_avg:.1f} | dist={best_distance:.2f}m")
+                print(f"[SAVE] Step {num_timesteps:,} | NEW BEST avg={current_avg:.1f} | dist={best_distance:.2f}m | Plot saved")
             else:
-                print(f"[SAVE] Step {num_timesteps:,} | avg={current_avg:.1f} | best_dist={best_distance:.2f}m")
+                print(f"[SAVE] Step {num_timesteps:,} | avg={current_avg:.1f} | best_dist={best_distance:.2f}m | Plot saved")
             
             # Visualize checkpoint if enabled
             if SHOW_AT_CHECKPOINTS:
@@ -476,34 +531,115 @@ def main():
     print("Run demo: python src/demo.py")
     print("="*55)
 
-    #Plotting
-    plot_rewards(all_ep_rewards, all_avg_rewards)
+    #Plotting final results
+    if len(all_ep_rewards) > 0:
+        try:
+            fig = plot_rewards(all_ep_rewards, all_avg_rewards, all_ep_distances, 
+                              all_ep_times, num_timesteps, best_distance)
+            fig.savefig("plots/training_final.png", dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print("Final training plot saved to plots/training_final.png")
+        except Exception as e:
+            print(f"Warning: Could not save final plot: {e}")
 
-def plot_rewards(rewards, avg_rewards):
-    """uses matplotlib to plot the raw and moving average rewards"""
-    print("Plotting rewards...")
-    plt.figure(figsize=(12,6))
-
-    #Plot raw rewards with transparency
-    plt.plot(rewards, label="Episode Rewards", alpha=0.3, color="blue")
-
-    #Plot moving average rewards
-    if len(avg_rewards) > 0:
-        plt.plot(avg_rewards, label="Moving Average Rewards(50 episodes)", color="red", linewidth=2)
-
+def plot_rewards(rewards, avg_rewards, distances, times, timesteps, best_distance):
+    """Create comprehensive training plot matching the live plotter style"""
+    print("Creating training plot...")
     
-    plt.title("PPO Training Progress: Episode Rewards Over Time")
-    plt.xlabel("Episode")
-    plt.ylabel("Total Reward")
-    plt.legend()
-    plt.grid(True)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     
-    #Save the plot
-    plot_path="plots/training_rewards.png"
-    os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    plt.savefig(plot_path)
-    print(f"Plot saved to {plot_path}")
-    #plt.show()
+    episodes = list(range(1, len(rewards) + 1))
+    
+    # ===== PLOT 1: REWARD GRAPH =====
+    ax1 = axes[0, 0]
+    ax1.plot(episodes, rewards, 'b-', alpha=0.4, linewidth=0.8, label='Episode')
+    # Moving average (20 episodes to match live plotter)
+    if len(rewards) >= 20:
+        avg = np.convolve(rewards, np.ones(20)/20, mode='valid')
+        ax1.plot(episodes[19:], avg, 'r-', linewidth=2, label='Avg(20)')
+    ax1.axhline(y=0, color='gray', linestyle=':', alpha=0.5)
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Reward')
+    ax1.set_title('Episode Rewards', fontweight='bold')
+    ax1.legend(loc='upper left', fontsize=8)
+    ax1.grid(True, alpha=0.3)
+    
+    # ===== PLOT 2: DISTANCE GRAPH (auto-scaled to actual progress) =====
+    ax2 = axes[0, 1]
+    ax2.plot(episodes, distances, 'g-', alpha=0.4, linewidth=0.8, label='Episode')
+    # Moving average
+    if len(distances) >= 20:
+        avg = np.convolve(distances, np.ones(20)/20, mode='valid')
+        ax2.plot(episodes[19:], avg, 'darkgreen', linewidth=2, label='Avg(20)')
+    # Best distance line
+    ax2.axhline(y=best_distance, color='red', linestyle='--', linewidth=1.5, 
+               label=f'Best: {best_distance:.2f}m')
+    # Auto-scale Y axis to show actual progress (max of best_distance * 1.5 or 10m minimum)
+    y_max = max(best_distance * 1.5, 10.0)
+    ax2.set_ylim(0, y_max)
+    ax2.set_xlabel('Episode')
+    ax2.set_ylabel('Distance (m)')
+    ax2.set_title(f'Distance Traveled (Goal: 100m)', fontweight='bold')
+    ax2.legend(loc='upper left', fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    
+    # ===== PLOT 3: SURVIVAL TIME GRAPH =====
+    ax3 = axes[1, 0]
+    best_time = max(times) if times else 0.0
+    ax3.plot(episodes, times, 'purple', alpha=0.4, linewidth=0.8, label='Episode')
+    # Moving average
+    if len(times) >= 20:
+        avg = np.convolve(times, np.ones(20)/20, mode='valid')
+        ax3.plot(episodes[19:], avg, 'darkviolet', linewidth=2, label='Avg(20)')
+    ax3.axhline(y=best_time, color='red', linestyle='--', linewidth=1.5,
+               label=f'Best: {best_time:.1f}s')
+    ax3.set_xlabel('Episode')
+    ax3.set_ylabel('Time (seconds)')
+    ax3.set_title('Survival Time', fontweight='bold')
+    ax3.legend(loc='upper left', fontsize=8)
+    ax3.grid(True, alpha=0.3)
+    
+    # ===== PLOT 4: STATISTICS =====
+    ax4 = axes[1, 1]
+    ax4.axis('off')
+    
+    # Recent averages (50 episodes to match training logs)
+    recent_reward = np.mean(rewards[-50:]) if len(rewards) >= 50 else np.mean(rewards) if rewards else 0
+    recent_dist = np.mean(distances[-50:]) if len(distances) >= 50 else np.mean(distances) if distances else 0
+    recent_time = np.mean(times[-50:]) if len(times) >= 50 else np.mean(times) if times else 0
+    
+    stats_text = f"""
+╔══════════════════════════════════════════╗
+║          TRAINING STATISTICS             ║
+╠══════════════════════════════════════════╣
+║  Episodes: {len(episodes):>6}                       ║
+║  Timesteps: {timesteps:>10,}                ║
+╠══════════════════════════════════════════╣
+║         BEST STATS (Independent)         ║
+╠──────────────────────────────────────────╣
+║  Best Reward:    {max(rewards) if rewards else 0:>10.2f}             ║
+║  Best Distance:  {best_distance:>10.2f} m           ║
+║  Best Survival:  {best_time:>10.1f} s           ║
+╠══════════════════════════════════════════╣
+║           RECENT AVERAGES (50ep)         ║
+╠──────────────────────────────────────────╣
+║  Avg Reward:   {recent_reward:>8.2f}                 ║
+║  Avg Distance: {recent_dist:>8.2f} m               ║
+║  Avg Survival: {recent_time:>8.1f} s               ║
+╚══════════════════════════════════════════╝
+"""
+    
+    ax4.text(0.05, 0.95, stats_text, fontsize=9, family='monospace',
+            verticalalignment='top', transform=ax4.transAxes,
+            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    
+    # Update title with progress
+    progress = (timesteps / TOTAL_TIMESTEPS) * 100
+    fig.suptitle(f'Training Progress - {progress:.1f}% | Best Distance: {best_distance:.2f}m / 100m Goal', 
+                fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    return fig
 
 if __name__ == "__main__":
     main()

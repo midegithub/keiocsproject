@@ -26,6 +26,9 @@ class RolloutBuffer:
         self.dones = torch.zeros(num_steps, device=device) # Terminal flags
 
         self.ptr = 0 # Current position in buffer
+    
+    def __len__(self):
+        return self.ptr
 
     def add(self, state, action, reward, log_prob, value, done):
         """Add one step of experience to the buffer."""
@@ -34,12 +37,13 @@ class RolloutBuffer:
             print("WARNING: buffer full, skipping")
             return # Buffer is full, so we don't add anything
         
-        self.states[self.ptr] = state
-        self.actions[self.ptr] = action
-        self.rewards[self.ptr] = reward # Direct assignment (faster)
-        self.log_probs[self.ptr] = log_prob
-        self.values[self.ptr] = value.squeeze() # Squeeze value to be 1-dimensional
-        self.dones[self.ptr] = float(done) # Direct float conversion
+        idx = self.ptr
+        self.states[idx] = state
+        self.actions[idx] = action
+        self.rewards[idx] = reward # Direct assignment (faster)
+        self.log_probs[idx] = log_prob
+        self.values[idx] = value.squeeze() # Squeeze value to be 1-dimensional
+        self.dones[idx] = float(done) # Direct float conversion
         self.ptr += 1 # Increment position
 
     def is_full(self):
@@ -52,25 +56,52 @@ class RolloutBuffer:
     def get_batch(self):
         """Return all stored data as tuple.
         Used by GAE algorithm to compute advantages."""
-
-        return (self.states,self.actions,self.rewards,self.log_probs,self.values,self.dones)
+        if self.ptr == 0:
+            raise RuntimeError("Rollout buffer is empty, collect data before reading it.")
+        
+        end = self.ptr
+        return (
+            self.states[:end],
+            self.actions[:end],
+            self.rewards[:end],
+            self.log_probs[:end],
+            self.values[:end],
+            self.dones[:end]
+        )
 
     def get_minibatch_generator(self, advantages, returns, minibatch_size):
         """Creates a generator that yields minibatches of experiences for
         the update phase. Reshuffles each time its called (for multiple epochs)."""
-
-        total = self.num_steps
+        total = self.ptr
+        if total == 0:
+            raise RuntimeError("Rollout buffer is empty, cannot create minibatches.")
+        
+        if advantages.shape[0] != total or returns.shape[0] != total:
+            raise ValueError("Advantages/returns size mismatch with rollout buffer.")
+        
         indices= np.arange(total)
         np.random.shuffle(indices)
-
+        
+        if total < minibatch_size:
+            yield (
+                self.states[indices],
+                self.actions[indices],
+                self.log_probs[indices],
+                self.values[indices],# Used for value function loss
+                advantages[indices],
+                returns[indices]
+            )
+            return
+        
         for start in range(0, total, minibatch_size):
             end = start + minibatch_size
-            
-            # Skip incomplete final batch
             if end > total:
-                continue
+                batch_idx = indices[start:total]
+            else:
+                batch_idx = indices[start:end]
             
-            batch_idx = indices[start:end] 
+            if batch_idx.size == 0:
+                continue
             
             yield( # Better than returning a tuple, because it is more efficient
                 self.states[batch_idx],

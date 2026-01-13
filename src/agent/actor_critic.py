@@ -61,7 +61,7 @@ class ActorCritic(nn.Module):
         """Initializes the Actor-Critic model for PMTG residual control.
         
         Arguments:
-            state_dim (int): Dimension of the state space (49 for PMTG observations)
+            state_dim (int): Dimension of the state space (37 for current observations)
             action_dim (int): Dimension of the action space (12 residual corrections)
             hidden_size (int): Dimension of the hidden layers of neurons
             normalize_obs (bool): Whether to normalize observations using running stats
@@ -88,8 +88,10 @@ class ActorCritic(nn.Module):
         # bigger network learns better policies
         self.shared_layers = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
             nn.Tanh(),
             nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
             nn.Tanh(),
             nn.Linear(hidden_size, hidden_size//2),
             nn.Tanh()
@@ -108,7 +110,7 @@ class ActorCritic(nn.Module):
 
         #output layers
         self.actor_mean= nn.Linear(hidden_size//2, action_dim)
-        self.log_std= nn.Parameter(torch.zeros(action_dim)) #Standard log-deviation of the action distribution
+        self.log_std= nn.Parameter(torch.full((action_dim,), -1.0)) #Lower std = smoother residuals
 
         self.critic= nn.Linear(hidden_size//2, 1)
         
@@ -134,6 +136,9 @@ class ActorCritic(nn.Module):
         Returns:
             the probability distribution of the actions (Actor)
             the estimated value of the state (Critic)"""
+        
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
         
         # Normalize observations if enabled (helps training stability)
         if self.normalize_obs:

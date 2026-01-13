@@ -167,7 +167,7 @@ class LivePlotter:
             ax1.legend(loc='upper left', fontsize=8)
             ax1.grid(True, alpha=0.3)
             
-            # ===== PLOT 2: DISTANCE GRAPH =====
+            # ===== PLOT 2: DISTANCE GRAPH (auto-scaled) =====
             ax2 = self.axes[0, 1]
             ax2.plot(episodes, distances, 'g-', alpha=0.4, linewidth=0.8, label='Episode')
             # Moving average
@@ -177,11 +177,12 @@ class LivePlotter:
             # Best distance line
             ax2.axhline(y=self.best_distance, color='red', linestyle='--', linewidth=1.5, 
                        label=f'Best: {self.best_distance:.2f}m')
-            # Goal lines
-            ax2.axhline(y=100, color='gold', linestyle='-', linewidth=2, alpha=0.7, label='GOAL: 100m')
+            # Auto-scale Y axis to show actual progress clearly
+            y_max = max(self.best_distance * 1.5, 10.0)
+            ax2.set_ylim(0, y_max)
             ax2.set_xlabel('Episode')
             ax2.set_ylabel('Distance (m)')
-            ax2.set_title('Distance Traveled', fontweight='bold')
+            ax2.set_title(f'Distance Traveled (Goal: 100m)', fontweight='bold')
             ax2.legend(loc='upper left', fontsize=8)
             ax2.grid(True, alpha=0.3)
             

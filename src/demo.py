@@ -79,9 +79,9 @@ def main():
     """run the trained robot with visualization"""
     
     # === USER OPTIONS ===
-    # Set to True to sample actions like training (stochastic)
-    # Set to False to use mean actions (deterministic, smoother)
-    USE_STOCHASTIC_ACTIONS = True  # Match training behavior
+    # True  -> sample actions like training (adds exploration / wobble)
+    # False -> use mean actions for smoother, repeatable demos
+    USE_STOCHASTIC_ACTIONS = False
     
     # find model
     model_path = find_best_model()
@@ -91,9 +91,9 @@ def main():
         return
     
     # create environment with gui
-    # IMPORTANT: use same sim_steps_per_action as training (6) for correct behavior
+    # IMPORTANT: use same sim_steps_per_action as training (24) for correct behavior
     # demo_mode=True removes time limits and relaxes termination so robot can run freely
-    env = MainPlayground(gui=True, sim_steps_per_action=6, use_position_control=True, demo_mode=True)
+    env = MainPlayground(gui=True, sim_steps_per_action=24, use_position_control=True, demo_mode=True)
     
     # Use same randomization as training for consistency
     state = env.reset(randomize=True)
@@ -163,7 +163,12 @@ def main():
             distance = info.get('distance', 0.0)
             speed = distance / elapsed_real if elapsed_real > 0 else 0.0
             
-            stats_text = f"Time: {elapsed_real:.1f}s | Distance: {distance:.2f}m | Speed: {speed:.2f}m/s | Reward: {ep_reward:.1f}"
+            target_vel = info.get('target_velocity', env.target_velocity)
+            stats_text = (
+                f"Time: {elapsed_real:.1f}s | Distance: {distance:.2f}m | "
+                f"Speed: {speed:.2f}m/s | Target: {target_vel:.2f}m/s | "
+                f"Reward: {ep_reward:.1f}"
+            )
             
             # position text above the robot
             text_pos = [base_pos[0], base_pos[1], base_pos[2] + 0.5]
@@ -198,8 +203,13 @@ def main():
             if done:
                 episode += 1
                 dist = info.get('distance', 0.0)
+                target_vel = info.get('target_velocity', env.target_velocity)
                 final_time = time.time() - episode_start_time
-                print(f"Episode {episode}: reward={ep_reward:.1f}, distance={dist:.2f}m, time={final_time:.1f}s")
+                print(
+                    f"Episode {episode}: reward={ep_reward:.1f}, "
+                    f"distance={dist:.2f}m, time={final_time:.1f}s, "
+                    f"target_vel={target_vel:.2f}m/s"
+                )
                 
                 # remove old stats text
                 if stats_text_id is not None:

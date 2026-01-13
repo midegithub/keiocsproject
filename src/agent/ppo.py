@@ -1,7 +1,7 @@
 import torch
 import torch.optim as optim
-from.actor_critic import ActorCritic # Import our network
-from.buffer import RolloutBuffer # Import our buffer
+from .actor_critic import ActorCritic # Import our network
+from .buffer import RolloutBuffer # Import our buffer
 
 
 class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Policy Optimization
@@ -46,32 +46,25 @@ class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Po
         """
 
         states, actions, rewards, log_probs, values, dones = buffer.get_batch()
-        # Initialize advantages and returns
-        advantages = torch.zeros_like(rewards).to(self.device)
-        last_gae_lam=0 #Gae means Generalized Advantage Estimation        last_advantage = 0
+        steps = rewards.shape[0]
+        advantages = torch.zeros(steps, device=self.device)
+        last_gae_lam = 0.0
+        last_value = last_value.squeeze()
+        last_done = float(last_done)
 
-        for t in reversed(range(buffer.num_steps)):
-            if t== buffer.num_steps -1:
-                # This is the last step T-1 of the rollout
-                #next value is V(S_T)
-                #next no terminal is (1.0-Done_T)
+        for t in reversed(range(steps)):
+            if t == steps - 1:
                 next_non_terminal = 1.0 - last_done
                 next_value = last_value
             else:
-                # This is a middle step T-1 of the rollout
-                #next value is V(S_t+1)
-                #next no terminal is (1.0-Done_t)
-                next_non_terminal = 1.0 - dones[t+1]
-                next_value = values[t+1]
+                next_non_terminal = 1.0 - dones[t + 1]
+                next_value = values[t + 1]
 
-            # This is the TD error (delta):
-            # delta_t= R_t + gamma * V(S_{t+1}) - V(S_t)
-            delta = rewards[t] + self.gamma*next_value*next_non_terminal-values[t]
-            # This is the GAE formula: A_t = delta_t + (gamma*lambda)*A_{t+1}
-            advantages[t] = last_gae_lam = delta + self.gamma *self.lambda_gae *next_non_terminal*last_gae_lam
+            delta = rewards[t] + self.gamma * next_value * next_non_terminal - values[t]
+            last_gae_lam = delta + self.gamma * self.lambda_gae * next_non_terminal * last_gae_lam
+            advantages[t] = last_gae_lam
 
-        # Returns are the targets value for value function(Critic)
-        returns = advantages + values
+        returns = advantages + values[:steps]
 
         return advantages, returns
 

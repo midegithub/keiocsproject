@@ -17,6 +17,13 @@ MOTOR_KD = 0.03
 MAX_TORQUE = 3.5
 TORQUE_LIMIT = 5.7
 
+# Reference gait parameters shared between training, demos, and curriculum
+DEFAULT_GAIT_VELOCITY = 0.6
+DEFAULT_GAIT_PERIOD = 0.45
+# Residual scale controls how much the policy can deviate from the scripted gait
+RESIDUAL_SCALES = np.array([0.3, 0.45, 0.55] * 4, dtype=np.float32)
+COMMAND_SMOOTHING = 0.25
+
 
 class MotorController:
     """Handles the conversion from position commands to torques.
@@ -168,10 +175,11 @@ class MainPlayground:
         p.setRealTimeSimulation(0)
         p.setTimeStep(PHYSICS_TIMESTEP, physicsClientId=self.client_id)
         
-        # More stable physics solver
+        # Optimized physics solver for speed vs stability balance
         p.setPhysicsEngineParameter(
-            numSolverIterations=50,
+            numSolverIterations=10,  # Reduced to 10 for maximum speed (sufficient for walking)
             enableConeFriction=0,
+            numSubSteps=1,  # Reduce substeps for speed
             physicsClientId=self.client_id
         )
         
@@ -194,7 +202,7 @@ class MainPlayground:
         self.actuated_joint_indices=None
         self.action_dim=0
         self.state_dim=None
-        print("Environment initialized")
+        # print("Environment initialized")
 
 
 
@@ -210,6 +218,13 @@ class MainPlayground:
             0.0, -0.89, 1.30,   # rear left
             0.0, -0.89, 1.30    # rear right
         ], dtype=np.float32)
+        self.prev_joint_targets = self.rest_pose.copy()
+        self.prev_action = np.zeros_like(self.rest_pose)
+        self.last_action_delta = 0.0
+        self.residual_scales = RESIDUAL_SCALES.copy()
+        self.command_smoothing = COMMAND_SMOOTHING
+        self.target_velocity = DEFAULT_GAIT_VELOCITY
+        self.gait_period = DEFAULT_GAIT_PERIOD
         
         #get the absolute path to the robot URDF (Unified Robotics description format)
         urdf_root= os.path.dirname(os.path.abspath(__file__))
@@ -266,14 +281,8 @@ class MainPlayground:
         self._reached_50m = False
         self._reached_100m = False
         
-        # Death ray (forces robot to keep moving forward)
-        self.ray_x = -1.0
-        self.ray_speed = 0.08
-        self.ray_delay = 10.0  # Seconds before ray starts
-        
-        self.ray_visual = None
-        if gui:
-            self._create_ray_visual()
+        # Death ray removed - not needed for learning
+        # Robot will learn from reward shaping alone
 
         print (f"Environment initialized. Action dim={self.action_dim}, position control={use_position_control}")
 
@@ -315,29 +324,44 @@ class MainPlayground:
                     restitution=0.0,
                     physicsClientId=self.client_id)
     
-    def _create_ray_visual(self):
-        """Red wall to show death ray position"""
-        viz = p.createVisualShape(
-            p.GEOM_BOX,
-            halfExtents=[0.02, 2.0, 1.0],
-            rgbaColor=[1, 0, 0, 0.7],
-            physicsClientId=self.client_id
-        )
-        self.ray_visual = p.createMultiBody(
-            baseMass=0,
-            baseVisualShapeIndex=viz,
-            basePosition=[-1.0, 0, 0.5],
-            physicsClientId=self.client_id
-        )
+    def _update_velocity_target(self, distance):
+        """Simple curriculum: increase desired velocity as the robot proves stability."""
+        if distance > 80.0:
+            self.target_velocity = 1.5
+            self.gait_period = 0.28
+        elif distance > 50.0:
+            self.target_velocity = 1.35
+            self.gait_period = 0.31
+        elif distance > 30.0:
+            self.target_velocity = 1.2
+            self.gait_period = 0.34
+        elif distance > 10.0:
+            self.target_velocity = 0.9
+            self.gait_period = 0.4
+        else:
+            self.target_velocity = DEFAULT_GAIT_VELOCITY
+            self.gait_period = DEFAULT_GAIT_PERIOD
     
-    def _update_ray_visual(self):
-        if self.ray_visual is not None:
-            p.resetBasePositionAndOrientation(
-                self.ray_visual,
-                [self.ray_x, 0, 0.5],
-                [0, 0, 0, 1],
-                physicsClientId=self.client_id
-            )
+    def _distance_bonus(self, distance):
+        """Award sparse bonuses when the robot hits new distance milestones."""
+        milestones = [
+            (1.0, '_reached_1m', 0.5),
+            (2.0, '_reached_2m', 0.5),
+            (3.0, '_reached_3m', 0.75),
+            (5.0, '_reached_5m', 1.0),
+            (10.0, '_reached_10m', 1.5),
+            (25.0, '_reached_25m', 2.5),
+            (50.0, '_reached_50m', 4.0),
+            (100.0, '_reached_100m', 6.0),
+        ]
+        
+        bonus = 0.0
+        for threshold, flag, value in milestones:
+            if distance >= threshold and not getattr(self, flag):
+                setattr(self, flag, True)
+                bonus += value
+        return bonus
+    
     
     def get_observation(self):
         """Get the complete state representation for the agent.
@@ -439,47 +463,57 @@ class MainPlayground:
         # Reset gait generator
         self.gait.phase = np.random.uniform(0, 1) if randomize else 0.0
         self.gait.last_time = 0.0
+        self.prev_action[:] = 0.0
+        self.prev_joint_targets = self.rest_pose.copy()
+        self.last_action_delta = 0.0
+        self.target_velocity = DEFAULT_GAIT_VELOCITY
+        self.gait_period = DEFAULT_GAIT_PERIOD
         
-        # Reset death ray
-        self.ray_x = -2.0
-        
-        # Curriculum: ray gets faster over time
-        if self.total_episodes > 1000:
-            self.ray_speed = 0.05
-        if self.total_episodes > 5000:
-            self.ray_speed = 0.08
-        
-        self._update_ray_visual()
 
         #Get initial observation
         return self.get_observation()
     
-    def _apply_action(self,action):
+    def _apply_action(self, action):
         """
-        Converts neural network output to motor commands.
-        Action is residual adjustment to reference gait (action=0 means follow gait exactly).
+        Actions act as residuals on top of the scripted trot gait.
+        Each joint gets a small offset but the base gait keeps the robot moving.
         """
+        action = np.asarray(action, dtype=np.float32)
+        if action.shape[0] != self.action_dim:
+            raise ValueError(f"Expected action dim {self.action_dim}, got {action.shape[0]}")
         action = np.clip(action, -1.0, 1.0)
         
-        # Get reference trajectory from gait generator
-        # Target velocity is ~0.5 m/s forward
-        foot_pos = self.gait.get_foot_positions(self.sim_time, velocity=0.6, period=0.4)
+        # Track smoothness penalty for reward shaping
+        self.last_action_delta = float(np.mean(np.abs(action - self.prev_action)))
+        self.prev_action = action
         
-        # Convert foot positions to joint angle offsets
-        # Simplified mapping: hip joint controls forward/back, knee controls height
+        # Reference trajectory from gait generator (trot)
+        foot_pos = self.gait.get_foot_positions(
+            self.sim_time,
+            velocity=self.target_velocity,
+            period=self.gait_period
+        )
+        
         gait_offset = np.zeros(12, dtype=np.float32)
         for leg in range(4):
             base_idx = leg * 3
-            gait_offset[base_idx + 0] = 0.0  # shoulder stays neutral
-            gait_offset[base_idx + 1] = foot_pos[leg, 0] * 2.0  # hip for forward/back
-            gait_offset[base_idx + 2] = foot_pos[leg, 1] * 3.0  # knee for lift
+            stride_scale = 1.0 + 0.35 * action[base_idx]
+            stride_scale = np.clip(stride_scale, 0.4, 1.6)
+            gait_offset[base_idx + 1] = foot_pos[leg, 0] * 2.0 * stride_scale
+            gait_offset[base_idx + 2] = foot_pos[leg, 1] * 3.0 * stride_scale
+            gait_offset[base_idx + 0] = 0.0  # shoulders stay near neutral
         
-        # Action is residual on top of gait
-        residual_scale = 0.15
-        target_pos = self.rest_pose + gait_offset + action * residual_scale
+        residual = action * self.residual_scales
+        target_pos = self.rest_pose + gait_offset + residual
+        
+        # Low-pass filter joint targets for stability
+        target_pos = (
+            self.command_smoothing * target_pos
+            + (1.0 - self.command_smoothing) * self.prev_joint_targets
+        )
+        self.prev_joint_targets = target_pos
         
         if self.use_position_control:
-            # Position control mode (more stable)
             p.setJointMotorControlArray(
                 self.robot_id,
                 self.actuated_joint_indices,
@@ -491,14 +525,16 @@ class MainPlayground:
                 physicsClientId=self.client_id
             )
         else:
-            # Torque control mode (more realistic but harder to learn)
-            joint_states = p.getJointStates(self.robot_id, self.actuated_joint_indices, physicsClientId=self.client_id)
+            joint_states = p.getJointStates(
+                self.robot_id,
+                self.actuated_joint_indices,
+                physicsClientId=self.client_id
+            )
             curr_pos = np.array([s[0] for s in joint_states])
             curr_vel = np.array([s[1] for s in joint_states])
             
             torques = self.motor.compute_torque(target_pos, curr_pos, curr_vel, curr_vel)
             
-            # Disable default motors first
             p.setJointMotorControlArray(
                 bodyUniqueId=self.robot_id,
                 jointIndices=self.actuated_joint_indices,
@@ -506,7 +542,6 @@ class MainPlayground:
                 forces=np.zeros(self.action_dim),
                 physicsClientId=self.client_id
             )
-
             p.setJointMotorControlArray(
                 bodyUniqueId=self.robot_id,
                 jointIndices=self.actuated_joint_indices,
@@ -531,10 +566,6 @@ class MainPlayground:
         self.episode_time += self.dt
         self.sim_time += self.dt
         
-        # Update death ray position after delay
-        if self.episode_time > self.ray_delay:
-            self.ray_x += self.ray_speed * self.dt
-            self._update_ray_visual()
 
         obs=self.get_observation()
         reward=self.get_reward()
@@ -549,116 +580,57 @@ class MainPlayground:
         if self.max_x_episode > self.max_x_ever:
             self.max_x_ever = self.max_x_episode
             new_record = True
-
+        
+        self._update_velocity_target(self.max_x_episode)
+        
         info={
             'distance': self.max_x_episode,
             'max_distance_ever': self.max_x_ever,
             'new_distance_record': new_record,
-            'death_ray_x': self.ray_x,
-            'ahead_of_ray': pos[0] - self.ray_x
+            'target_velocity': self.target_velocity
         }
 
         return obs, reward, done, info
             
 
     def get_reward(self):
-        """Reward function focused on forward locomotion.
-        Main components: forward velocity, progress bonus, penalties for drift and tilt."""
-
-        base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
+        """Reward forward progress, velocity tracking, posture, and smooth actions."""
+        base_pos, base_orn_quat = p.getBasePositionAndOrientation(
+            self.robot_id,
+            physicsClientId=self.client_id
+        )
         base_vel_lin, base_vel_ang = p.getBaseVelocity(self.robot_id, physicsClientId=self.client_id)
-
+        
+        roll, pitch, _ = p.getEulerFromQuaternion(base_orn_quat)
         x = base_pos[0]
         y = base_pos[1]
+        z = base_pos[2]
         x_velocity = base_vel_lin[0]
         
-        # Forward progress since last step
         delta_x = x - self.last_x
+        forward_reward = max(0.0, delta_x) * 120.0  # convert meters to roughly 0-1 scale
+        
+        velocity_tracking = math.exp(-2.5 * abs(x_velocity - self.target_velocity))
+        upright_reward = math.exp(-3.5 * (abs(roll) + abs(pitch)))
+        height_reward = math.exp(-6.0 * abs(z - 0.23))
+        
+        lateral_penalty = 0.1 * min(1.0, abs(y) / 1.5)
+        action_penalty = 0.5 * self.last_action_delta
+        angular_penalty = 0.05 * min(1.0, abs(base_vel_ang[1]) + abs(base_vel_ang[0]))
+        
+        reward = (
+            forward_reward
+            + 0.6 * velocity_tracking
+            + 0.25 * upright_reward
+            + 0.15 * height_reward
+            - lateral_penalty
+            - action_penalty
+            - angular_penalty
+        )
+        
+        reward += self._distance_bonus(x)
         self.last_x = x
-        
-        # === MAIN REWARDS ===
-        
-        # Reward forward velocity (the main goal)
-        vel_reward = 8.0 * x_velocity
-        
-        # Bonus for actual progress (not just velocity)
-        progress_reward = 15.0 * max(0, delta_x)
-        
-        # Small alive bonus (reduced to not dominate)
-        alive_bonus = 0.2
-        
-        # Bonus for staying ahead of death ray (pressure to move!)
-        if self.episode_time > self.ray_delay:
-            ahead_of_ray = x - self.ray_x
-            if ahead_of_ray > 0:
-                ray_bonus = 0.5 * min(ahead_of_ray, 2.0)
-            else:
-                ray_bonus = 2.0 * ahead_of_ray  # Negative when behind
-        else:
-            ray_bonus = 0.0
-        
-        # === PENALTIES ===
-        
-        # Drifting sideways is bad
-        drift_penalty = 0.3 * abs(y)
-        
-        # Tilting is bad (check if robot is upright)
-        rot_mat = p.getMatrixFromQuaternion(base_orn_quat)
-        up_vec = rot_mat[6:9]  # z-axis in world frame
-        tilt_penalty = 0.3 * (1.0 - up_vec[2])
-        
-        # Energy penalty (discourages jerky movements)
-        joint_states = p.getJointStates(self.robot_id, self.actuated_joint_indices, physicsClientId=self.client_id)
-        torques = np.array([s[3] for s in joint_states])
-        velocities = np.array([s[1] for s in joint_states])
-        energy = np.abs(np.dot(torques, velocities)) * self.dt
-        energy_penalty = 0.0003 * energy
-        
-        # Combine all components
-        reward = alive_bonus + vel_reward + progress_reward + ray_bonus - drift_penalty - tilt_penalty - energy_penalty
-
-        # === DISTANCE MILESTONES ===
-        if x > 1.0 and not self._reached_1m:
-            reward += 15.0
-            self._reached_1m = True
-            print("  >> 1m checkpoint!")
-        
-        if x > 2.0 and not self._reached_2m:
-            reward += 20.0
-            self._reached_2m = True
-            print("  >> 2m checkpoint!")
-        
-        if x > 3.0 and not self._reached_3m:
-            reward += 25.0
-            self._reached_3m = True
-            print("  >> 3m checkpoint!")
-            
-        if x > 5.0 and not self._reached_5m:
-            reward += 35.0
-            self._reached_5m = True
-            print("  >> 5m checkpoint!")
-            
-        if x > 10.0 and not self._reached_10m:
-            reward += 50.0
-            self._reached_10m = True
-            print("  >> 10m checkpoint!")
-            
-        if x > 25.0 and not self._reached_25m:
-            reward += 100.0
-            self._reached_25m = True
-            print("  >> 25m checkpoint!")
-            
-        if x > 50.0 and not self._reached_50m:
-            reward += 200.0
-            self._reached_50m = True
-            print("  >> 50m checkpoint!")
-            
-        if x > 100.0 and not self._reached_100m:
-            reward += 500.0
-            self._reached_100m = True
-            print("  >> 100m GOAL!")
-
-        return reward
+        return float(reward)
 
     def is_done(self):
         """Checks if the episode is done based on the robot's state."""
@@ -681,30 +653,29 @@ class MainPlayground:
                 print("  [Demo] Terminated: Robot on ground")
                 return True
             
-            # No time limit, no death ray in demo mode
+            # No time limit in demo mode
             return False
         
-        # TRAINING MODE: normal termination conditions
+        # TRAINING MODE: FIXED thresholds - no curriculum
+        tilt_threshold = 0.5  # Can tilt up to ~60 degrees
+        height_threshold = 0.05  # Minimum height before termination
+        sideways_threshold = 2.0  # Can drift 2m sideways
+        max_steps = 2000  # Short episodes = faster learning
         
         # Robot tilted too much
-        if up_vec[2] < 0.7:
+        if up_vec[2] < tilt_threshold:
             return True
         
         # Too low = fallen
-        if base_pos[2] < 0.08:
+        if base_pos[2] < height_threshold:
             return True
         
         # Drifted too far sideways
-        if abs(base_pos[1]) > 1.5:
+        if abs(base_pos[1]) > sideways_threshold:
             return True
         
-        # Caught by death ray
-        if self.episode_time > self.ray_delay:
-            if base_pos[0] < self.ray_x:
-                return True
-        
-        # Max episode length
-        if self.timestep > 100000:
+        # Max episode length (curriculum based)
+        if self.timestep > max_steps:
             return True
         
         return False
@@ -750,8 +721,7 @@ if __name__ == "__main__": #Only launches if file ran indepedently
     env = MainPlayground(gui=True, use_position_control=True) 
 
     print(f"\nState dim: {env.state_dim}, Action dim: {env.action_dim}")
-    print("Robot should walk forward with zero action (following reference gait)")
-    print("Red death ray starts after delay\n")
+    print("Robot should walk forward with zero action (following reference gait)\n")
 
     obs = env.reset(randomize=False)
     zero_action = np.zeros(env.action_dim)
@@ -764,12 +734,7 @@ if __name__ == "__main__": #Only launches if file ran indepedently
             
             if step % 60 == 0:
                 t = env.episode_time
-                ahead = info['ahead_of_ray']
-                if t < env.ray_delay:
-                    status = f"grace ({env.ray_delay - t:.1f}s left)"
-                else:
-                    status = "SAFE" if ahead > 0 else "DANGER"
-                print(f"t={t:.1f}s dist={info['distance']:.2f}m ray={ahead:.2f}m [{status}]")
+                print(f"t={t:.1f}s dist={info['distance']:.2f}m reward={reward:.1f}")
             
             if done:
                 print(f"Episode done. Distance: {info['distance']:.2f}m")

@@ -67,17 +67,13 @@ def main():
     
     print(f"\nFound {len(joint_indices)} actuated joints")
     
-    # STANDING POSE - Spot-like bent-leg stance for stability
+    # STANDING POSE - matches the training rest pose used by MainPlayground
     # Structure: [shoulder, hip, knee] × 4 legs
-    # Using symmetric hip angles for balanced stance:
-    #   Shoulder: 0 (neutral)
-    #   Hip: -0.7 for all legs (the working position!)
-    #   Knee: 1.4 rad (~80°) - moderate bend
     standing_pose = [
-        0.0, -0.7, 1.4,   # URDF front left (becomes world rear after 180°)
-        0.0, -0.7, 1.4,   # URDF front right (becomes world rear)
-        0.0, -0.7, 1.4,   # URDF rear left (becomes world FRONT x+)
-        0.0, -0.7, 1.4    # URDF rear right (becomes world FRONT x+)
+        0.0, -0.89, 1.30,   # URDF front left (becomes world rear after 180°)
+        0.0, -0.89, 1.30,   # URDF front right (becomes world rear)
+        0.0, -0.89, 1.30,   # URDF rear left (becomes world FRONT x+)
+        0.0, -0.89, 1.30    # URDF rear right (becomes world FRONT x+)
     ]
     
     print("\nStanding pose joint angles:")
