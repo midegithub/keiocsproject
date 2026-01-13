@@ -92,9 +92,10 @@ def main():
     
     # create environment with gui
     # IMPORTANT: use same sim_steps_per_action as training (24) for correct behavior
+    # The policy was trained with 24 steps, so demo must match for correct behavior
     # demo_mode=True removes time limits and relaxes termination so robot can run freely
-    # Use fewer steps per action for smoother demo visualization
-    env = MainPlayground(gui=True, sim_steps_per_action=6, use_position_control=True, demo_mode=True)
+    # maxVelocity limits in motor control ensure smooth motion despite faster stepping
+    env = MainPlayground(gui=True, sim_steps_per_action=24, use_position_control=True, demo_mode=True)
     
     # Use same randomization as training for consistency
     state = env.reset(randomize=True)
@@ -120,9 +121,9 @@ def main():
     import pybullet as p
     
     # timing for real-time playback
-    # each step is 6 physics steps * 0.001s = 0.006s of sim time
-    # we want roughly real-time, so sleep ~6ms per step
-    step_time = 0.006  # 6ms per control step (matches physics)
+    # each step is 24 physics steps * 0.001s = 0.024s of sim time
+    # we want roughly real-time, so sleep ~24ms per step
+    step_time = 0.024  # 24ms per control step (matches training physics)
     
     # Increase solver iterations for smoother motion
     p.setPhysicsEngineParameter(

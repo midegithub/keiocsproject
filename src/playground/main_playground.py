@@ -18,8 +18,9 @@ MAX_TORQUE = 3.5
 TORQUE_LIMIT = 5.7
 
 # Reference gait parameters shared between training, demos, and curriculum
-DEFAULT_GAIT_VELOCITY = 0.6
-DEFAULT_GAIT_PERIOD = 0.45
+# Must match walk_demo.py for consistent behavior
+DEFAULT_GAIT_VELOCITY = 0.8
+DEFAULT_GAIT_PERIOD = 0.4
 # Residual scale controls how much the policy can deviate from the scripted gait
 RESIDUAL_SCALES = np.array([0.3, 0.45, 0.55] * 4, dtype=np.float32)
 COMMAND_SMOOTHING = 0.25
@@ -285,8 +286,13 @@ class MainPlayground:
         self._reached_50m = False
         self._reached_100m = False
         
-        # Death ray removed - not needed for learning
-        # Robot will learn from reward shaping alone
+        # Death barrier system - robot must keep moving or die!
+        # Target: 100m in 5 minutes (300 seconds) = 0.333 m/s minimum speed
+        # Barrier starts 10m behind robot and advances at required pace
+        self.DEATH_BARRIER_START_OFFSET = -10.0  # Barrier starts 10m behind
+        self.DEATH_BARRIER_SPEED = 100.0 / 300.0  # 0.333 m/s (100m in 5 minutes)
+        self.GOAL_DISTANCE = 100.0  # Win condition
+        self.death_barrier_pos = self.DEATH_BARRIER_START_OFFSET
 
         print (f"Environment initialized. Action dim={self.action_dim}, position control={use_position_control}")
 
@@ -329,20 +335,22 @@ class MainPlayground:
                     physicsClientId=self.client_id)
     
     def _update_velocity_target(self, distance):
-        """Simple curriculum: increase desired velocity as the robot proves stability."""
+        """Simple curriculum: increase desired velocity as the robot proves stability.
+        Velocities are tuned to stay comfortably ahead of death barrier (0.333 m/s)."""
         if distance > 80.0:
-            self.target_velocity = 1.5
-            self.gait_period = 0.28
-        elif distance > 50.0:
-            self.target_velocity = 1.35
-            self.gait_period = 0.31
-        elif distance > 30.0:
             self.target_velocity = 1.2
-            self.gait_period = 0.34
-        elif distance > 10.0:
+            self.gait_period = 0.32
+        elif distance > 50.0:
+            self.target_velocity = 1.0
+            self.gait_period = 0.35
+        elif distance > 30.0:
             self.target_velocity = 0.9
+            self.gait_period = 0.38
+        elif distance > 10.0:
+            self.target_velocity = 0.85
             self.gait_period = 0.4
         else:
+            # Start with default gait (0.8 velocity matches walk_demo.py)
             self.target_velocity = DEFAULT_GAIT_VELOCITY
             self.gait_period = DEFAULT_GAIT_PERIOD
     
@@ -464,6 +472,9 @@ class MainPlayground:
         self._reached_50m = False
         self._reached_100m = False
         
+        # Reset death barrier to starting position (10m behind robot)
+        self.death_barrier_pos = random_pos[0] + self.DEATH_BARRIER_START_OFFSET
+        
         # Reset gait generator
         self.gait.phase = np.random.uniform(0, 1) if randomize else 0.0
         self.gait.last_time = 0.0
@@ -518,18 +529,20 @@ class MainPlayground:
         self.prev_joint_targets = target_pos
         
         if self.use_position_control:
-            p.setJointMotorControlArray(
-                self.robot_id,
-                self.actuated_joint_indices,
-                p.POSITION_CONTROL,
-                targetPositions=target_pos.tolist(),
-                forces=[MAX_TORQUE] * 12,
-                positionGains=[MOTOR_KP] * 12,
-                velocityGains=[MOTOR_KD] * 12,
-                targetVelocities=[0] * 12,
-                maxVelocities=[6.0] * 12,  # Limit max velocity to prevent jerky movements (realistic servo speed)
-                physicsClientId=self.client_id
-            )
+            # Use individual joint control to support maxVelocity parameter
+            # maxVelocity is critical for smooth, realistic motion
+            for i, joint_idx in enumerate(self.actuated_joint_indices):
+                p.setJointMotorControl2(
+                    self.robot_id,
+                    joint_idx,
+                    p.POSITION_CONTROL,
+                    targetPosition=target_pos[i],
+                    force=MAX_TORQUE,
+                    positionGain=MOTOR_KP,
+                    velocityGain=MOTOR_KD,
+                    maxVelocity=6.0,  # Limit max velocity to prevent jerky movements (realistic servo speed)
+                    physicsClientId=self.client_id
+                )
         else:
             joint_states = p.getJointStates(
                 self.robot_id,
@@ -589,11 +602,17 @@ class MainPlayground:
         
         self._update_velocity_target(self.max_x_episode)
         
+        # Calculate distance ahead of death barrier
+        distance_from_barrier = pos[0] - self.death_barrier_pos
+        
         info={
             'distance': self.max_x_episode,
             'max_distance_ever': self.max_x_ever,
             'new_distance_record': new_record,
-            'target_velocity': self.target_velocity
+            'target_velocity': self.target_velocity,
+            'death_barrier_pos': self.death_barrier_pos,
+            'distance_from_barrier': distance_from_barrier,
+            'episode_time': self.episode_time
         }
 
         return obs, reward, done, info
@@ -639,7 +658,14 @@ class MainPlayground:
         return float(reward)
 
     def is_done(self):
-        """Checks if the episode is done based on the robot's state."""
+        """Checks if the episode is done based on the robot's state.
+        
+        Uses a 'death barrier' system instead of time limits:
+        - Barrier starts 10m behind robot and advances at 0.333 m/s
+        - Robot must maintain minimum forward progress or barrier catches up
+        - This allows unlimited time as long as robot keeps moving forward
+        - Target: reach 100m before barrier catches you
+        """
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
         
         # Check if robot is upright using rotation matrix
@@ -662,11 +688,10 @@ class MainPlayground:
             # No time limit in demo mode
             return False
         
-        # TRAINING MODE: FIXED thresholds - no curriculum
+        # TRAINING MODE with death barrier system
         tilt_threshold = 0.5  # Can tilt up to ~60 degrees
         height_threshold = 0.05  # Minimum height before termination
         sideways_threshold = 2.0  # Can drift 2m sideways
-        max_steps = 2000  # Short episodes = faster learning
         
         # Robot tilted too much
         if up_vec[2] < tilt_threshold:
@@ -680,10 +705,22 @@ class MainPlayground:
         if abs(base_pos[1]) > sideways_threshold:
             return True
         
-        # Max episode length (curriculum based)
-        if self.timestep > max_steps:
+        # === DEATH BARRIER SYSTEM ===
+        # Advance the barrier based on elapsed time
+        self.death_barrier_pos = self.DEATH_BARRIER_START_OFFSET + (self.episode_time * self.DEATH_BARRIER_SPEED)
+        
+        # If robot is behind the barrier -> DEATH
+        if base_pos[0] < self.death_barrier_pos:
             return True
         
+        # === WIN CONDITION ===
+        # Robot reached the goal distance!
+        if base_pos[0] >= self.GOAL_DISTANCE:
+            print(f"  [Training] SUCCESS! Robot reached {self.GOAL_DISTANCE}m in {self.episode_time:.1f}s!")
+            return True
+        
+        # No arbitrary time limit - robot can take as long as needed
+        # as long as it stays ahead of the death barrier
         return False
     
 

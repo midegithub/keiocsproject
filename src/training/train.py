@@ -387,8 +387,9 @@ def main():
 
             if done:
                 episode_dist = info.get('distance', 0.0)
-                survival_time = env.episode_time
-                target_vel = info.get('target_velocity', getattr(env, 'target_velocity', 0.6))
+                survival_time = info.get('episode_time', env.episode_time)
+                target_vel = info.get('target_velocity', getattr(env, 'target_velocity', 0.8))
+                barrier_dist = info.get('distance_from_barrier', 0.0)
                 
                 # Check for new distance record
                 if episode_dist > best_distance:
@@ -427,7 +428,7 @@ def main():
                         f"[{progress:5.1f}%] Ep {ep_num:4d} | "
                         f"R={current_ep_reward:7.1f} | Avg={avg_reward:7.1f} | "
                         f"Dist={episode_dist:5.2f}m | T={survival_time:5.1f}s | "
-                        f"Best={best_distance:.2f}m | VelTgt={target_vel:.2f}m/s"
+                        f"Best={best_distance:.2f}m | Barrier+{barrier_dist:.1f}m"
                     )
 
                 #Reset
