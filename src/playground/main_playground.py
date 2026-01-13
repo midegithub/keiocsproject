@@ -103,15 +103,19 @@ class GaitGenerator:
         return result
     
     def _stance_trajectory(self, phase_stance, velocity):
-        """Linear trajectory during stance (foot on ground)"""
+        """Linear trajectory during stance (foot on ground)
+        Foot moves backward relative to body as body moves forward"""
         half_stride = 0.05
+        # Progress from 1.0 (front) to -1.0 (back) during stance
         progress = half_stride * (1 - 2 * phase_stance)
         x = progress * abs(velocity)
+        # Slight vertical motion for realistic foot contact
         z = -0.001 * math.cos(math.pi * progress / (2 * half_stride))
         return x, z
     
     def _swing_trajectory(self, phase_swing, velocity, direction=1.0):
-        """Bezier curve trajectory during swing (foot in air)"""
+        """Bezier curve trajectory during swing (foot in air)
+        Foot swings forward in preparation for next stance"""
         x = self._bezier(phase_swing, self.swing_x * direction) * abs(velocity)
         z = self._bezier(phase_swing, self.swing_z) * abs(velocity)
         return x, z
@@ -522,6 +526,8 @@ class MainPlayground:
                 forces=[MAX_TORQUE] * 12,
                 positionGains=[MOTOR_KP] * 12,
                 velocityGains=[MOTOR_KD] * 12,
+                targetVelocities=[0] * 12,
+                maxVelocities=[6.0] * 12,  # Limit max velocity to prevent jerky movements (realistic servo speed)
                 physicsClientId=self.client_id
             )
         else:

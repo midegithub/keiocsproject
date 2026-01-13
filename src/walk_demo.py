@@ -27,6 +27,12 @@ def main():
     p.setGravity(0, 0, -9.81)
     p.setTimeStep(1./240.)
     
+    # Increase solver iterations for smooth, stable motion
+    p.setPhysicsEngineParameter(
+        numSolverIterations=50,
+        enableConeFriction=1
+    )
+    
     # Setup camera
     p.resetDebugVisualizerCamera(
         cameraDistance=2.5,
@@ -86,21 +92,31 @@ def main():
     gait = GaitGenerator("trot")
     dt = 1./240.
     t = 0.0
-    gait_velocity = 0.8
-    gait_period = 0.4
+    gait_velocity = 0.8  # Back to original working velocity
+    gait_period = 0.4  # Back to original period
+    
+    # For smooth joint transitions
+    prev_joint_targets = np.array(standing_pose.copy())
     
     step_count = 0
     
     try:
         while True:
             foot_positions = gait.get_foot_positions(t, velocity=gait_velocity, period=gait_period)
-            joint_targets = standing_pose.copy()
+            joint_targets = np.array(standing_pose.copy())
+            
+            # Apply foot positions to joints (back to original scaling)
             for leg in range(4):
                 base_idx = leg * 3
-                joint_targets[base_idx + 1] += foot_positions[leg, 0] * 2.0
-                joint_targets[base_idx + 2] += foot_positions[leg, 1] * 3.0
+                joint_targets[base_idx + 1] += foot_positions[leg, 0] * 2.0  # Hip joint
+                joint_targets[base_idx + 2] += foot_positions[leg, 1] * 3.0  # Knee joint
             
-            # Apply joint angles with position control
+            # Smooth transition between targets to prevent jerky motion
+            smoothing_factor = 0.3
+            joint_targets = smoothing_factor * joint_targets + (1.0 - smoothing_factor) * prev_joint_targets
+            prev_joint_targets = joint_targets.copy()
+            
+            # Apply joint angles with position control and velocity limits
             for i, joint_idx in enumerate(joint_indices):
                 p.setJointMotorControl2(
                     robot_id,
@@ -108,8 +124,9 @@ def main():
                     controlMode=p.POSITION_CONTROL,
                     targetPosition=joint_targets[i],
                     force=50.0,
-                    positionGain=0.3,
-                    velocityGain=1.0
+                    positionGain=1.0,  # Increased for better tracking
+                    velocityGain=0.5,  # Adjusted for smooth damping
+                    maxVelocity=6.0    # Critical: limits joint speed to realistic values
                 )
             
             # Step simulation
