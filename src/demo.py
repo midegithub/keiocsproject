@@ -111,8 +111,12 @@ def main():
     
     print(f"Loaded model: {model_path}")
     print(f"Action mode: {'STOCHASTIC (like training)' if USE_STOCHASTIC_ACTIONS else 'DETERMINISTIC (mean)'}")
-    print("\nRunning demo... Press Ctrl+C to stop")
-    print("Camera follows the robot automatically\n")
+    print("\n" + "="*60)
+    print("DEMO CONTROLS:")
+    print("  - Press 'C' in PyBullet window to toggle camera follow")
+    print("  - Use mouse to rotate camera when follow is OFF")
+    print("  - Press Ctrl+C in terminal to stop")
+    print("="*60 + "\n")
     
     episode = 0
     ep_reward = 0
@@ -131,8 +135,13 @@ def main():
         physicsClientId=env.client_id
     )
     
+    # Camera follow mode (can be toggled)
+    camera_follow = True
+    camera_follow_interval = 30  # Update camera every N steps (less aggressive)
+    
     # debug text IDs for updating stats display
     stats_text_id = None
+    barrier_warning_id = None
     
     try:
         last_time = time.time()
@@ -155,16 +164,26 @@ def main():
             ep_reward += reward
             step += 1
             
+            # Check for keyboard input to toggle camera follow
+            keys = p.getKeyboardEvents(physicsClientId=env.client_id)
+            if ord('c') in keys and keys[ord('c')] & p.KEY_WAS_TRIGGERED:
+                camera_follow = not camera_follow
+                print(f"Camera follow: {'ON' if camera_follow else 'OFF'}")
+            
             # get robot position for camera and stats
             base_pos, _ = p.getBasePositionAndOrientation(env.robot_id, physicsClientId=env.client_id)
             
-            # camera follow
-            if step % 10 == 0:
+            # camera follow (less aggressive, can be toggled off)
+            if camera_follow and step % camera_follow_interval == 0:
                 p.resetDebugVisualizerCamera(
-                    2.5, 30, -20,
-                    [base_pos[0], base_pos[1], 0.3],
+                    3.0, 45, -25,  # Wider view
+                    [base_pos[0], base_pos[1], 0.2],
                     physicsClientId=env.client_id
                 )
+            
+            # Get barrier info
+            barrier_pos = info.get('death_barrier_pos', env.death_barrier_pos)
+            distance_from_barrier = info.get('distance_from_barrier', base_pos[0] - barrier_pos)
             
             # update real-time stats display in PyBullet window
             elapsed_real = time.time() - episode_start_time
@@ -172,17 +191,29 @@ def main():
             speed = distance / elapsed_real if elapsed_real > 0 else 0.0
             
             target_vel = info.get('target_velocity', env.target_velocity)
+            
+            # Main stats text
             stats_text = (
                 f"Time: {elapsed_real:.1f}s | Distance: {distance:.2f}m | "
-                f"Speed: {speed:.2f}m/s | Target: {target_vel:.2f}m/s | "
-                f"Reward: {ep_reward:.1f}"
+                f"Speed: {speed:.2f}m/s | Reward: {ep_reward:.1f}"
             )
+            
+            # Barrier warning text (changes color based on danger)
+            if distance_from_barrier < 5.0:
+                barrier_color = [1, 0, 0]  # Red - DANGER
+                barrier_text = f"!!! BARRIER: {distance_from_barrier:.1f}m BEHIND - DANGER !!!"
+            elif distance_from_barrier < 10.0:
+                barrier_color = [1, 0.5, 0]  # Orange - Warning
+                barrier_text = f"BARRIER: {distance_from_barrier:.1f}m behind - Speed up!"
+            else:
+                barrier_color = [0, 1, 0]  # Green - Safe
+                barrier_text = f"Barrier: {distance_from_barrier:.1f}m behind - Safe"
             
             # position text above the robot
             text_pos = [base_pos[0], base_pos[1], base_pos[2] + 0.5]
+            barrier_text_pos = [base_pos[0], base_pos[1], base_pos[2] + 0.7]
             
             if stats_text_id is not None:
-                # update existing text
                 stats_text_id = p.addUserDebugText(
                     stats_text,
                     text_pos,
@@ -192,12 +223,30 @@ def main():
                     physicsClientId=env.client_id
                 )
             else:
-                # create new text
                 stats_text_id = p.addUserDebugText(
                     stats_text,
                     text_pos,
                     textColorRGB=[1, 1, 0],  # yellow
                     textSize=1.5,
+                    physicsClientId=env.client_id
+                )
+            
+            # Barrier warning text
+            if barrier_warning_id is not None:
+                barrier_warning_id = p.addUserDebugText(
+                    barrier_text,
+                    barrier_text_pos,
+                    textColorRGB=barrier_color,
+                    textSize=1.2,
+                    replaceItemUniqueId=barrier_warning_id,
+                    physicsClientId=env.client_id
+                )
+            else:
+                barrier_warning_id = p.addUserDebugText(
+                    barrier_text,
+                    barrier_text_pos,
+                    textColorRGB=barrier_color,
+                    textSize=1.2,
                     physicsClientId=env.client_id
                 )
             
@@ -211,18 +260,28 @@ def main():
             if done:
                 episode += 1
                 dist = info.get('distance', 0.0)
-                target_vel = info.get('target_velocity', env.target_velocity)
+                barrier_dist = info.get('distance_from_barrier', 0.0)
                 final_time = time.time() - episode_start_time
+                
+                # Determine death cause
+                if barrier_dist <= 0:
+                    death_cause = "KILLED BY BARRIER"
+                else:
+                    death_cause = "fell/flipped"
+                
                 print(
                     f"Episode {episode}: reward={ep_reward:.1f}, "
                     f"distance={dist:.2f}m, time={final_time:.1f}s, "
-                    f"target_vel={target_vel:.2f}m/s"
+                    f"cause={death_cause}"
                 )
                 
                 # remove old stats text
                 if stats_text_id is not None:
                     p.removeUserDebugItem(stats_text_id, physicsClientId=env.client_id)
                     stats_text_id = None
+                if barrier_warning_id is not None:
+                    p.removeUserDebugItem(barrier_warning_id, physicsClientId=env.client_id)
+                    barrier_warning_id = None
                 
                 state = env.reset(randomize=False)
                 ep_reward = 0

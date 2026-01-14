@@ -166,6 +166,7 @@ class MainPlayground:
             demo_mode: Relaxed termination for visualization
         """
         #Start Physics server, p.GUI opens a visible window whereas p.DIRECT runs headless
+        self.gui_mode = gui  # Store GUI mode flag for later use
         if gui:
             self.client_id=p.connect(p.GUI)
             #slider for debugging GUI
@@ -291,8 +292,11 @@ class MainPlayground:
         # Barrier starts 10m behind robot and advances at required pace
         self.DEATH_BARRIER_START_OFFSET = -10.0  # Barrier starts 10m behind
         self.DEATH_BARRIER_SPEED = 100.0 / 300.0  # 0.333 m/s (100m in 5 minutes)
-        self.GOAL_DISTANCE = 100.0  # Win condition
+        self.GOAL_DISTANCE = 100.0  # First major milestone
         self.death_barrier_pos = self.DEATH_BARRIER_START_OFFSET
+        self.barrier_visual_id = None  # Visual representation of death barrier
+        self.goal_visual_id = None  # Visual representation of goal line
+        self.reached_goal = False  # Track if 100m reached (for speed bonus mode)
 
         print (f"Environment initialized. Action dim={self.action_dim}, position control={use_position_control}")
 
@@ -333,6 +337,60 @@ class MainPlayground:
                     rollingFriction=0.1,
                     restitution=0.0,
                     physicsClientId=self.client_id)
+    
+    def _create_visual_barrier(self):
+        """Create a visual red barrier that shows the death zone"""
+        # Remove old barrier if exists
+        if self.barrier_visual_id is not None:
+            p.removeBody(self.barrier_visual_id, physicsClientId=self.client_id)
+        
+        # Create a tall red semi-transparent wall
+        barrier_visual = p.createVisualShape(
+            p.GEOM_BOX,
+            halfExtents=[0.05, 3.0, 1.5],  # Thin, wide, tall
+            rgbaColor=[1.0, 0.0, 0.0, 0.6],  # Red, semi-transparent
+            physicsClientId=self.client_id
+        )
+        
+        self.barrier_visual_id = p.createMultiBody(
+            baseMass=0,  # No physics
+            baseVisualShapeIndex=barrier_visual,
+            basePosition=[self.death_barrier_pos, 0, 0.75],
+            physicsClientId=self.client_id
+        )
+        
+        return self.barrier_visual_id
+    
+    def _create_goal_line(self):
+        """Create a visual green goal line at 100m"""
+        if self.goal_visual_id is not None:
+            p.removeBody(self.goal_visual_id, physicsClientId=self.client_id)
+        
+        goal_visual = p.createVisualShape(
+            p.GEOM_BOX,
+            halfExtents=[0.05, 3.0, 0.5],  # Thin, wide, shorter than barrier
+            rgbaColor=[0.0, 1.0, 0.0, 0.5],  # Green, semi-transparent
+            physicsClientId=self.client_id
+        )
+        
+        self.goal_visual_id = p.createMultiBody(
+            baseMass=0,
+            baseVisualShapeIndex=goal_visual,
+            basePosition=[self.GOAL_DISTANCE, 0, 0.25],
+            physicsClientId=self.client_id
+        )
+        
+        return self.goal_visual_id
+    
+    def _update_barrier_visual(self):
+        """Move the visual barrier to match the death barrier position"""
+        if self.barrier_visual_id is not None:
+            p.resetBasePositionAndOrientation(
+                self.barrier_visual_id,
+                [self.death_barrier_pos, 0, 0.75],
+                [0, 0, 0, 1],
+                physicsClientId=self.client_id
+            )
     
     def _update_velocity_target(self, distance):
         """Simple curriculum: increase desired velocity as the robot proves stability.
@@ -474,6 +532,15 @@ class MainPlayground:
         
         # Reset death barrier to starting position (10m behind robot)
         self.death_barrier_pos = random_pos[0] + self.DEATH_BARRIER_START_OFFSET
+        self.reached_goal = False
+        
+        # Create visual barrier and goal line (only in GUI mode)
+        if self.gui_mode:
+            try:
+                self._create_visual_barrier()
+                self._create_goal_line()
+            except Exception as e:
+                print(f"Warning: Could not create visual barriers: {e}")
         
         # Reset gait generator
         self.gait.phase = np.random.uniform(0, 1) if randomize else 0.0
@@ -585,6 +652,12 @@ class MainPlayground:
         self.episode_time += self.dt
         self.sim_time += self.dt
         
+        # Update death barrier position
+        self.death_barrier_pos = self.DEATH_BARRIER_START_OFFSET + (self.episode_time * self.DEATH_BARRIER_SPEED)
+        
+        # Update visual barrier (only in GUI mode)
+        if self.gui_mode and self.barrier_visual_id is not None:
+            self._update_barrier_visual()
 
         obs=self.get_observation()
         reward=self.get_reward()
@@ -619,7 +692,7 @@ class MainPlayground:
             
 
     def get_reward(self):
-        """Reward forward progress, velocity tracking, posture, and smooth actions."""
+        """Reward forward progress, velocity tracking, posture, smooth actions, and barrier avoidance."""
         base_pos, base_orn_quat = p.getBasePositionAndOrientation(
             self.robot_id,
             physicsClientId=self.client_id
@@ -643,6 +716,22 @@ class MainPlayground:
         action_penalty = 0.5 * self.last_action_delta
         angular_penalty = 0.05 * min(1.0, abs(base_vel_ang[1]) + abs(base_vel_ang[0]))
         
+        # === BARRIER AVOIDANCE REWARD ===
+        # Reward for staying ahead of the death barrier
+        distance_from_barrier = x - self.death_barrier_pos
+        
+        # Danger zone: within 5m of barrier - increasing penalty as you get closer
+        if distance_from_barrier < 5.0:
+            barrier_penalty = 0.5 * (5.0 - distance_from_barrier) / 5.0  # 0 to 0.5 penalty
+        else:
+            barrier_penalty = 0.0
+        
+        # Bonus for being far ahead of barrier (encourages speed)
+        if distance_from_barrier > 15.0:
+            barrier_bonus = 0.2 * min(1.0, (distance_from_barrier - 15.0) / 20.0)
+        else:
+            barrier_bonus = 0.0
+        
         reward = (
             forward_reward
             + 0.6 * velocity_tracking
@@ -651,9 +740,18 @@ class MainPlayground:
             - lateral_penalty
             - action_penalty
             - angular_penalty
+            - barrier_penalty
+            + barrier_bonus
         )
         
         reward += self._distance_bonus(x)
+        
+        # Big bonus for reaching 100m goal (only once per episode)
+        if x >= self.GOAL_DISTANCE and not self.reached_goal:
+            self.reached_goal = True
+            reward += 50.0  # Big bonus!
+            print(f"  [GOAL] 100m reached in {self.episode_time:.1f}s! Speed bonus mode activated!")
+        
         self.last_x = x
         return float(reward)
 
@@ -664,7 +762,7 @@ class MainPlayground:
         - Barrier starts 10m behind robot and advances at 0.333 m/s
         - Robot must maintain minimum forward progress or barrier catches up
         - This allows unlimited time as long as robot keeps moving forward
-        - Target: reach 100m before barrier catches you
+        - After 100m: continue running for speed bonus, barrier keeps advancing!
         """
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
         
@@ -672,23 +770,32 @@ class MainPlayground:
         rot_mat = p.getMatrixFromQuaternion(base_orn_quat)
         up_vec = rot_mat[6:9]
         
-        if self.demo_mode:
-            # DEMO MODE: very relaxed - only terminate on catastrophic failure
-            
-            # Completely flipped over (upside down)
-            if up_vec[2] < 0.3:
+        # === COMMON FAILURE CONDITIONS (both demo and training) ===
+        
+        # Completely flipped over (upside down)
+        if up_vec[2] < 0.3:
+            if self.demo_mode:
                 print("  [Demo] Terminated: Robot flipped over")
-                return True
-            
-            # Robot fell through floor somehow
-            if base_pos[2] < 0.03:
+            return True
+        
+        # Robot fell through floor
+        if base_pos[2] < 0.03:
+            if self.demo_mode:
                 print("  [Demo] Terminated: Robot on ground")
-                return True
-            
-            # No time limit in demo mode
+            return True
+        
+        # === DEATH BARRIER (active in BOTH modes!) ===
+        # If robot is behind the barrier -> DEATH
+        if base_pos[0] < self.death_barrier_pos:
+            if self.demo_mode:
+                print(f"  [Demo] KILLED BY BARRIER at {base_pos[0]:.1f}m (barrier at {self.death_barrier_pos:.1f}m)")
+            return True
+        
+        if self.demo_mode:
+            # Demo mode: only barrier and catastrophic failure terminate
             return False
         
-        # TRAINING MODE with death barrier system
+        # === TRAINING MODE additional checks ===
         tilt_threshold = 0.5  # Can tilt up to ~60 degrees
         height_threshold = 0.05  # Minimum height before termination
         sideways_threshold = 2.0  # Can drift 2m sideways
@@ -705,22 +812,10 @@ class MainPlayground:
         if abs(base_pos[1]) > sideways_threshold:
             return True
         
-        # === DEATH BARRIER SYSTEM ===
-        # Advance the barrier based on elapsed time
-        self.death_barrier_pos = self.DEATH_BARRIER_START_OFFSET + (self.episode_time * self.DEATH_BARRIER_SPEED)
+        # NO TERMINATION AT 100m - robot continues for speed bonus!
+        # The barrier keeps advancing, so robot must maintain speed
+        # Episode only ends when barrier catches up or robot falls
         
-        # If robot is behind the barrier -> DEATH
-        if base_pos[0] < self.death_barrier_pos:
-            return True
-        
-        # === WIN CONDITION ===
-        # Robot reached the goal distance!
-        if base_pos[0] >= self.GOAL_DISTANCE:
-            print(f"  [Training] SUCCESS! Robot reached {self.GOAL_DISTANCE}m in {self.episode_time:.1f}s!")
-            return True
-        
-        # No arbitrary time limit - robot can take as long as needed
-        # as long as it stays ahead of the death barrier
         return False
     
 
