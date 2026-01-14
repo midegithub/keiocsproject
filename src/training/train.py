@@ -6,7 +6,6 @@ import sys
 import glob
 import pickle
 from pathlib import Path
-from datetime import datetime
 
 if hasattr(torch, "set_float32_matmul_precision"):
     torch.set_float32_matmul_precision("high")
@@ -264,19 +263,16 @@ def show_new_record(agent, distance):
 
 def find_latest_model():
     """Find most recent saved model to resume training"""
-    model_files = glob.glob("models/ppo_spotmicro_*.pth")
+    # First check for LAST checkpoint (used for resuming training)
+    last_path = "models/ppo_spotmicro_LAST.pth"
+    if os.path.exists(last_path):
+        return last_path
     
-    numeric_models = []
-    for f in model_files:
-        try:
-            suffix = f.split('_')[-1].split('.')[0]
-            steps = int(suffix)
-            numeric_models.append((f, steps))
-        except ValueError:
-            continue  # skip non-numeric like BEST.pth
+    # Fallback: check for BEST model
+    best_path = "models/ppo_spotmicro_BEST.pth"
+    if os.path.exists(best_path):
+        return best_path
     
-    if numeric_models:
-        return max(numeric_models, key=lambda x: x[1])[0]
     return None
 
 
@@ -451,16 +447,17 @@ def main():
         # 2 - update the policy
         agent.update(buffer, advantages, returns)
 
-        # 3 - save the model
+        # 3 - save the model (only keep LAST and BEST, overwrite previous)
         if rollout_count % SAVE_INTERVAL == 0:
-            save_path=f"models/ppo_spotmicro_{num_timesteps}.pth"
+            # Save as LAST (overwrites previous checkpoint)
+            save_path = "models/ppo_spotmicro_LAST.pth"
             torch.save(agent.model.state_dict(), save_path)
             
             # Calculate current performance
             current_avg = np.mean(all_ep_rewards[-50:]) if len(all_ep_rewards) >= 50 else np.mean(all_ep_rewards) if all_ep_rewards else float('-inf')
             
-            # Save performance metrics
-            data_path = f"data/training_data_{num_timesteps}.pkl"
+            # Save performance metrics (overwrites previous)
+            data_path = "data/training_data_LAST.pkl"
             with open(data_path, 'wb') as f:
                 pickle.dump({
                     'rewards': all_ep_rewards, 
@@ -472,33 +469,23 @@ def main():
                     'best_distance': best_distance
                 }, f)
             
-            # Save training plot at each checkpoint
+            # Save training plot (overwrites previous)
             if len(all_ep_rewards) > 0:
                 try:
                     fig = plot_rewards(all_ep_rewards, all_avg_rewards, all_ep_distances, 
                                       all_ep_times, num_timesteps, best_distance)
-                    plot_path = f"plots/training_progress_{num_timesteps}.png"
-                    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-                    plt.close(fig)
-                    # Also save as latest
-                    fig = plot_rewards(all_ep_rewards, all_avg_rewards, all_ep_distances, 
-                                      all_ep_times, num_timesteps, best_distance)
-                    fig.savefig("plots/training_latest.png", dpi=150, bbox_inches='tight')
+                    fig.savefig("plots/training_progress_LAST.png", dpi=150, bbox_inches='tight')
                     plt.close(fig)
                 except Exception as e:
                     print(f"Warning: Could not save plot: {e}")
             
-            # Track best model
+            # Track best model (only save if new best)
             if current_avg > best_avg_reward:
                 best_avg_reward = current_avg
-                # Save a copy as "best" model with timestamp
-                timestamp = datetime.now().strftime("%d%m%H%M")  # day month hour minute
-                torch.save(agent.model.state_dict(), f"models/ppo_spotmicro_BEST_{timestamp}.pth")
-                # Also save without timestamp for easy reference
                 torch.save(agent.model.state_dict(), "models/ppo_spotmicro_BEST.pth")
-                print(f"[SAVE] Step {num_timesteps:,} | NEW BEST avg={current_avg:.1f} | dist={best_distance:.2f}m | Plot saved")
+                print(f"[SAVE] Step {num_timesteps:,} | NEW BEST avg={current_avg:.1f} | dist={best_distance:.2f}m")
             else:
-                print(f"[SAVE] Step {num_timesteps:,} | avg={current_avg:.1f} | best_dist={best_distance:.2f}m | Plot saved")
+                print(f"[SAVE] Step {num_timesteps:,} | avg={current_avg:.1f} | best_dist={best_distance:.2f}m")
             
             # Visualize checkpoint if enabled
             if SHOW_AT_CHECKPOINTS:

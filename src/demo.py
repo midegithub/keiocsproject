@@ -6,8 +6,6 @@ import torch
 import time
 import os
 import sys
-import glob
-import pickle
 from pathlib import Path
 
 # setup imports
@@ -27,52 +25,67 @@ def find_best_model():
     # first check for explicit BEST model
     best_path = "models/ppo_spotmicro_BEST.pth"
     if os.path.exists(best_path):
-        print(f"Found BEST model: {best_path}")
         return best_path
     
-    # look for best performing from training data
-    data_files = glob.glob("data/training_data_*.pkl")
-    if data_files:
-        best_reward = float('-inf')
-        best_timestep = None
-        
-        for f in data_files:
-            try:
-                with open(f, 'rb') as fp:
-                    data = pickle.load(fp)
-                    avg = data.get('avg_reward_50', float('-inf'))
-                    ts = data.get('timesteps', 0)
-                    
-                    if avg > best_reward:
-                        best_reward = avg
-                        best_timestep = ts
-            except:
-                continue
-        
-        if best_timestep:
-            model_path = f"models/ppo_spotmicro_{best_timestep}.pth"
-            if os.path.exists(model_path):
-                print(f"Best model (avg reward {best_reward:.1f}): {model_path}")
-                return model_path
-    
-    # fallback: get latest model by timestep
-    model_files = glob.glob("models/ppo_spotmicro_*.pth")
-    if model_files:
-        numeric = []
-        for f in model_files:
-            try:
-                suffix = f.split('_')[-1].split('.')[0]
-                ts = int(suffix)
-                numeric.append((f, ts))
-            except ValueError:
-                continue
-        
-        if numeric:
-            latest = max(numeric, key=lambda x: x[1])[0]
-            print(f"Using latest model: {latest}")
-            return latest
+    # fallback: check for LAST checkpoint
+    last_path = "models/ppo_spotmicro_LAST.pth"
+    if os.path.exists(last_path):
+        return last_path
     
     return None
+
+
+def ask_model_path():
+    """Ask user to choose a model path interactively"""
+    
+    print("\n" + "=" * 60)
+    print("QUADRUPED ROBOT DEMO")
+    print("=" * 60)
+    
+    # Find default model
+    default_model = find_best_model()
+    
+    print("\nChoose which model to run:")
+    print("-" * 60)
+    print("Example paths:")
+    print("  models/ppo_spotmicro_BEST.pth")
+    print("  models/ppo_spotmicro_LAST.pth")
+    print("  models/100m/ppo_spotmicro_2990080.pth")
+    print("  models/backup25111500/ppo_spotmicro_BEST.pth")
+    print("-" * 60)
+    
+    if default_model:
+        print(f"Default (press Enter): {default_model}")
+    else:
+        print("No default model found - please enter a path")
+    
+    print()
+    
+    while True:
+        try:
+            user_input = input("Model path: ").strip()
+            
+            # Use default if empty input
+            if user_input == "":
+                if default_model:
+                    print(f"Using default: {default_model}")
+                    return default_model
+                else:
+                    print("ERROR: No default model available. Please enter a path.")
+                    continue
+            
+            # Check if file exists
+            if os.path.exists(user_input):
+                print(f"Selected: {user_input}")
+                return user_input
+            else:
+                print(f"ERROR: File not found: {user_input}")
+                print("Please check the path and try again.")
+                continue
+                
+        except KeyboardInterrupt:
+            print("\nDemo cancelled.")
+            return None
 
 
 def main():
@@ -83,10 +96,13 @@ def main():
     # False -> use mean actions for smoother, repeatable demos
     USE_STOCHASTIC_ACTIONS = False
     
-    # find model
-    model_path = find_best_model()
-    if model_path is None or not os.path.exists(model_path):
-        print("ERROR: No trained model found!")
+    # Ask user to choose model
+    model_path = ask_model_path()
+    if model_path is None:
+        return  # User cancelled
+    
+    if not os.path.exists(model_path):
+        print(f"ERROR: Model file not found: {model_path}")
         print("Train one first: python src/training/train.py")
         return
     
