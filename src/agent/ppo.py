@@ -1,7 +1,7 @@
 import torch
 import torch.optim as optim
-from .actor_critic import ActorCritic # Import our network
-from .buffer import RolloutBuffer # Import our buffer
+from agent.actor_critic import ActorCritic
+from agent.buffer import RolloutBuffer
 
 
 class PPOAgent: # PPOAgent is the class for the PPO agent, PPO means Proximal Policy Optimization
