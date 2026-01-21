@@ -136,14 +136,24 @@ class ObstacleManager:
         self.obstacles.append(obs)
         return obs
     
-    def generate_course(self, obstacle_types, start_x=5.0, end_x=120.0, seed=None):
-        """generate obstacle course"""
+    def generate_course(self, obstacle_types, start_x=5.0, end_x=120.0, seed=None, create_walls=False):
+        """generate obstacle course
+        
+        Args:
+            obstacle_types: List of obstacle types to generate
+            start_x: Starting x position for obstacles
+            end_x: Ending x position for obstacles  
+            seed: Random seed for reproducibility
+            create_walls: Whether to create corridor walls (False if parent already has them)
+        """
         if seed is not None:
             np.random.seed(seed)
         
         self._types = obstacle_types
         
-        self.create_walls(start_x=-2.0, length=end_x + 10)
+        # Only create walls if explicitly requested (MainPlayground already creates them)
+        if create_walls:
+            self.create_walls(start_x=-2.0, length=end_x + 10)
         
         x = start_x
         count = 0

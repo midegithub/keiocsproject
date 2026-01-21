@@ -17,6 +17,14 @@ MOTOR_KD = 0.03
 MAX_TORQUE = 3.5
 TORQUE_LIMIT = 5.7
 
+# Corridor parameters - walls are ALWAYS present to teach straight walking
+CORRIDOR_WIDTH = 4.0       # Total width of corridor (meters)
+CORRIDOR_HALF = 2.0        # Half width - walls at +/- this distance
+CORRIDOR_LENGTH = 150.0    # Length of corridor
+WALL_HEIGHT = 2.0          # Visual height of walls
+WALL_THICK = 0.1           # Wall thickness
+WALL_COLOR = [0.3, 0.3, 0.35, 0.8]  # Dark gray, semi-transparent
+
 # Reference gait parameters shared between training, demos, and curriculum
 # Must match walk_demo.py for consistent behavior
 DEFAULT_GAIT_VELOCITY = 0.8
@@ -297,6 +305,10 @@ class MainPlayground:
         self.barrier_visual_id = None  # Visual representation of death barrier
         self.goal_visual_id = None  # Visual representation of goal line
         self.reached_goal = False  # Track if 100m reached (for speed bonus mode)
+        
+        # Corridor walls - ALWAYS present to teach straight walking
+        self.wall_ids = []
+        self._create_corridor_walls()
 
         print (f"Environment initialized. Action dim={self.action_dim}, position control={use_position_control}")
 
@@ -391,6 +403,68 @@ class MainPlayground:
                 [0, 0, 0, 1],
                 physicsClientId=self.client_id
             )
+    
+    def _create_corridor_walls(self):
+        """Create corridor walls at +/- CORRIDOR_HALF meters.
+        Walls are ALWAYS present to teach the robot to walk straight."""
+        # Remove old walls if they exist
+        if hasattr(self, 'wall_ids') and self.wall_ids:
+            for wid in self.wall_ids:
+                try:
+                    p.removeBody(wid, physicsClientId=self.client_id)
+                except:
+                    pass
+        
+        self.wall_ids = []
+        
+        # Wall dimensions
+        half_ext = [CORRIDOR_LENGTH / 2, WALL_THICK / 2, WALL_HEIGHT / 2]
+        start_x = -5.0  # Start slightly behind robot
+        
+        # Left wall (negative Y)
+        left_vis = p.createVisualShape(
+            p.GEOM_BOX,
+            halfExtents=half_ext,
+            rgbaColor=WALL_COLOR,
+            physicsClientId=self.client_id
+        )
+        left_col = p.createCollisionShape(
+            p.GEOM_BOX,
+            halfExtents=half_ext,
+            physicsClientId=self.client_id
+        )
+        left_wall = p.createMultiBody(
+            baseMass=0,  # Static
+            baseCollisionShapeIndex=left_col,
+            baseVisualShapeIndex=left_vis,
+            basePosition=[start_x + CORRIDOR_LENGTH / 2, -CORRIDOR_HALF - WALL_THICK / 2, WALL_HEIGHT / 2],
+            physicsClientId=self.client_id
+        )
+        self.wall_ids.append(left_wall)
+        
+        # Right wall (positive Y)
+        right_vis = p.createVisualShape(
+            p.GEOM_BOX,
+            halfExtents=half_ext,
+            rgbaColor=WALL_COLOR,
+            physicsClientId=self.client_id
+        )
+        right_col = p.createCollisionShape(
+            p.GEOM_BOX,
+            halfExtents=half_ext,
+            physicsClientId=self.client_id
+        )
+        right_wall = p.createMultiBody(
+            baseMass=0,
+            baseCollisionShapeIndex=right_col,
+            baseVisualShapeIndex=right_vis,
+            basePosition=[start_x + CORRIDOR_LENGTH / 2, CORRIDOR_HALF + WALL_THICK / 2, WALL_HEIGHT / 2],
+            physicsClientId=self.client_id
+        )
+        self.wall_ids.append(right_wall)
+        
+        if self.gui_mode:
+            print(f"Corridor walls created at y=±{CORRIDOR_HALF}m")
     
     def _update_velocity_target(self, distance):
         """Simple curriculum: increase desired velocity as the robot proves stability.
@@ -712,7 +786,30 @@ class MainPlayground:
         upright_reward = math.exp(-3.5 * (abs(roll) + abs(pitch)))
         height_reward = math.exp(-6.0 * abs(z - 0.23))
         
-        lateral_penalty = 0.1 * min(1.0, abs(y) / 1.5)
+        # === WALL AVOIDANCE - CRITICAL FOR STRAIGHT WALKING ===
+        # Distance from center (y=0) - robot should stay centered
+        wall_dist = CORRIDOR_HALF - abs(y)  # Distance to nearest wall
+        
+        # Reward for staying centered (bonus when near center)
+        centering_reward = 0.3 * math.exp(-2.0 * abs(y))  # Max 0.3 at center, decays
+        
+        # STRONG penalty when approaching walls
+        if wall_dist < 1.5:
+            # Exponentially increasing penalty as robot approaches wall
+            # At 1.5m from wall: small penalty
+            # At 0.5m from wall: large penalty
+            # At wall contact: massive penalty
+            wall_penalty = 2.0 * math.exp(-2.0 * wall_dist)  # Exponential penalty
+        elif wall_dist < 0.5:
+            # Very close to wall - severe penalty
+            wall_penalty = 5.0 * (0.5 - wall_dist) / 0.5 + 2.0
+        else:
+            wall_penalty = 0.0
+        
+        # Lateral velocity penalty - penalize sideways movement
+        y_velocity = abs(base_vel_lin[1])
+        lateral_vel_penalty = 0.3 * min(1.0, y_velocity / 0.5)
+        
         action_penalty = 0.5 * self.last_action_delta
         angular_penalty = 0.05 * min(1.0, abs(base_vel_ang[1]) + abs(base_vel_ang[0]))
         
@@ -737,7 +834,9 @@ class MainPlayground:
             + 0.6 * velocity_tracking
             + 0.25 * upright_reward
             + 0.15 * height_reward
-            - lateral_penalty
+            + centering_reward
+            - wall_penalty
+            - lateral_vel_penalty
             - action_penalty
             - angular_penalty
             - barrier_penalty
@@ -763,6 +862,7 @@ class MainPlayground:
         - Robot must maintain minimum forward progress or barrier catches up
         - This allows unlimited time as long as robot keeps moving forward
         - After 100m: continue running for speed bonus, barrier keeps advancing!
+        - WALL COLLISION terminates in BOTH demo and training modes!
         """
         base_pos, base_orn_quat=p.getBasePositionAndOrientation(self.robot_id,physicsClientId=self.client_id)
         
@@ -784,6 +884,14 @@ class MainPlayground:
                 print("  [Demo] Terminated: Robot on ground")
             return True
         
+        # === WALL COLLISION (active in BOTH modes!) ===
+        # Walls are at +/- CORRIDOR_HALF, terminate if too close
+        wall_margin = 0.15  # Small margin before wall contact
+        if abs(base_pos[1]) > (CORRIDOR_HALF - wall_margin):
+            if self.demo_mode:
+                print(f"  [Demo] WALL COLLISION at y={base_pos[1]:.2f}m (walls at ±{CORRIDOR_HALF}m)")
+            return True
+        
         # === DEATH BARRIER (active in BOTH modes!) ===
         # If robot is behind the barrier -> DEATH
         if base_pos[0] < self.death_barrier_pos:
@@ -792,13 +900,12 @@ class MainPlayground:
             return True
         
         if self.demo_mode:
-            # Demo mode: only barrier and catastrophic failure terminate
+            # Demo mode: only barrier, wall collision, and catastrophic failure terminate
             return False
         
         # === TRAINING MODE additional checks ===
         tilt_threshold = 0.5  # Can tilt up to ~60 degrees
         height_threshold = 0.05  # Minimum height before termination
-        sideways_threshold = 2.0  # Can drift 2m sideways
         
         # Robot tilted too much
         if up_vec[2] < tilt_threshold:
@@ -806,10 +913,6 @@ class MainPlayground:
         
         # Too low = fallen
         if base_pos[2] < height_threshold:
-            return True
-        
-        # Drifted too far sideways
-        if abs(base_pos[1]) > sideways_threshold:
             return True
         
         # NO TERMINATION AT 100m - robot continues for speed bonus!

@@ -5,8 +5,8 @@ import pybullet as p
 import numpy as np
 import math
 
-from playground.main_playground import MainPlayground
-from playground.obstacles import ObstacleManager, ObstacleConfig, CORRIDOR_HALF
+from playground.main_playground import MainPlayground, CORRIDOR_HALF
+from playground.obstacles import ObstacleManager, ObstacleConfig
 
 
 class ObstaclePlayground(MainPlayground):
@@ -160,10 +160,7 @@ class ObstaclePlayground(MainPlayground):
                         reward -= 0.1
                     break
         
-        # penalty near walls (walls at +/- 2m)
-        wall_dist = CORRIDOR_HALF - abs(y)
-        if wall_dist < 1.0:
-            reward -= 0.2 * (1.0 - wall_dist)
+        # Note: Wall penalty is handled by parent class (MainPlayground)
         
         return reward
     
@@ -212,19 +209,8 @@ class ObstaclePlayground(MainPlayground):
         return obs
     
     def is_done(self):
-        """check if episode ended"""
-        if super().is_done():
-            return True
-        
-        # only check wall collision if obstacles are enabled (walls exist)
-        if self.enable_obstacles and len(self._obstacle_types) > 0:
-            pos, _ = p.getBasePositionAndOrientation(self.robot_id, physicsClientId=self.client_id)
-            if abs(pos[1]) > CORRIDOR_HALF - 0.2:
-                if self.demo_mode:
-                    print(f"  hit wall y={pos[1]:.2f}")
-                return True
-        
-        return False
+        """check if episode ended - walls are handled by parent class"""
+        return super().is_done()
     
     def close(self):
         self.obstacle_manager.clear_all()
